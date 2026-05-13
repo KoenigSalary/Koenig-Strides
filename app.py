@@ -5,10 +5,11 @@ from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 from openai import OpenAI
 import numpy as np
+import base64
 
 # =====================================================
-# KOENIG STRIDE
-# GPT + Semantic Search Version with Logo Correction
+# KOENIG STRIDE - MODERN UI VERSION
+# GPT + Semantic Search + Protected Logic
 # =====================================================
 
 st.set_page_config(
@@ -29,117 +30,383 @@ LOGO_PATH = BASE_DIR / "assets" / "koenig_logo.png"
 SARIKA_PATH = BASE_DIR / "assets" / "sarika.png"
 
 # =====================================================
-# BASIC CSS
+# IMAGE BASE64
+# =====================================================
+
+def image_to_base64(path):
+    if path.exists():
+        with open(path, "rb") as f:
+            return base64.b64encode(f.read()).decode()
+    return ""
+
+LOGO_B64 = image_to_base64(LOGO_PATH)
+SARIKA_B64 = image_to_base64(SARIKA_PATH)
+
+# =====================================================
+# CSS
 # =====================================================
 
 st.markdown("""
 <style>
+:root {
+    --bg: #f6f8fb;
+    --card: #ffffff;
+    --blue: #155be8;
+    --blue-dark: #071a4f;
+    --text: #111827;
+    --muted: #64748b;
+    --border: #dbe3ef;
+    --shadow: 0 14px 35px rgba(15, 23, 42, 0.08);
+}
+
 [data-testid="stAppViewContainer"] {
-    background: #f7f9fc;
+    background: var(--bg);
+}
+
+[data-testid="stHeader"] {
+    background: rgba(246, 248, 251, 0.85);
 }
 
 .block-container {
-    padding-top: 2rem;
-    max-width: 1250px;
+    padding-top: 1.1rem;
+    max-width: 1380px;
 }
 
-.header-box {
-    background: linear-gradient(120deg, #0f172a 0%, #123c92 55%, #2563eb 100%);
+#MainMenu, footer {
+    visibility: hidden;
+}
+
+.topbar {
+    background: #ffffff;
+    border-bottom: 1px solid #e5eaf2;
+    padding: 18px 22px;
+    border-radius: 0 0 24px 24px;
+    box-shadow: 0 8px 26px rgba(15,23,42,0.05);
+    margin-bottom: 22px;
+}
+
+.logo-img {
+    width: 220px;
+    max-width: 100%;
+    object-fit: contain;
+    display: block;
+}
+
+.brand-title {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-top: 2px;
+}
+
+.bot-icon {
+    width: 46px;
+    height: 46px;
+    border-radius: 50%;
+    background: #155be8;
     color: white;
-    padding: 28px 32px;
-    border-radius: 24px;
-    margin-bottom: 25px;
-    box-shadow: 0 12px 30px rgba(15, 23, 42, 0.15);
-}
-
-.header-box h1 {
-    margin: 0;
-    font-size: 42px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 23px;
     font-weight: 800;
 }
 
-.header-box p {
-    margin: 6px 0 0 0;
+.brand-title h1 {
+    margin: 0;
+    font-size: 38px;
+    font-weight: 800;
+    letter-spacing: -0.7px;
+    color: var(--text);
+}
+
+.brand-subtitle {
+    color: #334155;
+    margin-left: 62px;
+    margin-top: 4px;
     font-size: 16px;
-    opacity: 0.92;
+}
+
+.header-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 12px;
+    align-items: center;
+    padding-top: 10px;
+}
+
+.help-pill {
+    color: #111827;
+    font-weight: 600;
+    padding: 10px 12px;
+}
+
+.user-pill {
+    background: #ffffff;
+    border: 1px solid var(--border);
+    padding: 12px 18px;
+    border-radius: 14px;
+    box-shadow: 0 4px 16px rgba(15,23,42,0.06);
+    font-weight: 700;
+}
+
+.layout-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 22px;
+    box-shadow: var(--shadow);
 }
 
 .assistant-card {
-    background: white;
-    padding: 18px;
-    border-radius: 22px;
-    border: 1px solid #e5e7eb;
-    box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
-}
-
-.chat-card {
-    background: white;
     padding: 22px;
-    border-radius: 22px;
-    border: 1px solid #e5e7eb;
-    box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+    margin-bottom: 16px;
 }
 
-.user-bubble {
-    background: #dbeafe;
-    padding: 14px 16px;
-    border-radius: 16px;
-    margin: 10px 0;
-    border: 1px solid #bfdbfe;
+.assistant-name {
+    font-size: 27px;
+    font-weight: 800;
+    color: var(--text);
+    margin-bottom: 20px;
 }
 
-.bot-bubble {
-    background: #f8fafc;
-    padding: 14px 16px;
-    border-radius: 16px;
-    margin: 10px 0;
-    border: 1px solid #e2e8f0;
+.avatar-circle-wrap {
+    width: 100%;
+    display: flex;
+    justify-content: center;
+    position: relative;
 }
 
-.protected-bubble {
-    background: #fff7ed;
-    padding: 14px 16px;
-    border-radius: 16px;
-    margin: 10px 0;
-    border-left: 6px solid #f97316;
-    border-top: 1px solid #fed7aa;
-    border-bottom: 1px solid #fed7aa;
-    border-right: 1px solid #fed7aa;
+.avatar-circle {
+    width: 245px;
+    height: 245px;
+    border-radius: 50%;
+    overflow: hidden;
+    border: 5px solid #0b4f8a;
+    background: #111827;
+    box-shadow: inset 0 0 0 8px #ffffff;
+}
+
+.avatar-circle img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.status-dot {
+    position: absolute;
+    bottom: 18px;
+    right: 35px;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: #22c55e;
+    border: 4px solid white;
 }
 
 .online-pill {
     background: #dcfce7;
     color: #166534;
-    padding: 10px 14px;
+    padding: 13px 18px;
     border-radius: 14px;
-    font-weight: 600;
+    margin-top: 22px;
+    font-weight: 700;
+}
+
+.help-card {
+    padding: 24px;
+}
+
+.help-card h3 {
+    margin: 0 0 20px 0;
+    font-size: 22px;
+}
+
+.help-line {
+    font-size: 17px;
+    margin: 12px 0;
+    color: #111827;
+}
+
+.hero {
+    min-height: 170px;
+    border-radius: 22px;
+    background:
+        radial-gradient(circle at 85% 40%, rgba(255,255,255,0.18), transparent 30%),
+        linear-gradient(120deg, #071a4f 0%, #063a9e 55%, #1267f1 100%);
+    color: white;
+    padding: 42px 46px;
+    box-shadow: var(--shadow);
+    margin-bottom: 18px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.hero h2 {
+    font-size: 34px;
+    margin: 0 0 14px 0;
+    font-weight: 800;
+}
+
+.hero p {
+    font-size: 18px;
+    line-height: 1.6;
+    margin: 0;
+    max-width: 760px;
+}
+
+.hero-graphic {
+    font-size: 76px;
+    opacity: 0.9;
+    margin-right: 15px;
+}
+
+.main-card {
+    padding: 28px 30px;
+}
+
+.ask-title {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 29px;
+    font-weight: 800;
+    margin-bottom: 22px;
+    color: var(--text);
+}
+
+.welcome-bubble {
+    background: linear-gradient(180deg, #f8fbff 0%, #eef5ff 100%);
+    border: 1px solid var(--border);
+    padding: 20px 24px;
+    border-radius: 17px;
+    font-size: 18px;
+    line-height: 1.55;
+    margin-bottom: 26px;
+}
+
+.section-title {
+    font-size: 22px;
+    font-weight: 800;
+    margin: 10px 0 18px 0;
+}
+
+.suggest-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px 22px;
+    margin-bottom: 22px;
+}
+
+.suggest-card {
+    background: #ffffff;
+    border: 1px solid var(--border);
+    border-radius: 15px;
+    padding: 16px 18px;
+    box-shadow: 0 5px 16px rgba(15,23,42,0.05);
+    font-size: 17px;
+    color: #111827;
+}
+
+.input-card {
+    padding: 24px;
     margin-top: 12px;
 }
 
-.help-list {
+.user-bubble {
+    background: #dbeafe;
+    padding: 16px 18px;
+    border-radius: 17px;
+    margin: 13px 0;
+    border: 1px solid #bfdbfe;
+    font-size: 16px;
+}
+
+.bot-bubble {
     background: #f8fafc;
-    padding: 16px;
-    border-radius: 16px;
+    padding: 16px 18px;
+    border-radius: 17px;
+    margin: 13px 0;
     border: 1px solid #e2e8f0;
-    margin-top: 16px;
+    font-size: 16px;
+}
+
+.protected-bubble {
+    background: #fff7ed;
+    padding: 16px 18px;
+    border-radius: 17px;
+    margin: 13px 0;
+    border-left: 6px solid #f97316;
+    border-top: 1px solid #fed7aa;
+    border-bottom: 1px solid #fed7aa;
+    border-right: 1px solid #fed7aa;
+    font-size: 16px;
 }
 
 .small-text {
-    color: #64748b;
+    color: var(--muted);
     font-size: 12px;
 }
 
-.stButton button {
-    border-radius: 12px !important;
-    font-weight: 600 !important;
+.stButton > button {
+    border-radius: 13px !important;
+    font-weight: 700 !important;
+    border: 1px solid var(--border) !important;
+    background: #ffffff !important;
+    color: #111827 !important;
+    box-shadow: 0 5px 16px rgba(15,23,42,0.05) !important;
+    min-height: 48px;
 }
 
-@media only screen and (max-width: 768px) {
-    .header-box h1 {
-        font-size: 30px;
+.stButton > button:hover {
+    border-color: #93c5fd !important;
+    background: #eff6ff !important;
+}
+
+div[data-testid="stForm"] {
+    border: 1px solid var(--border);
+    background: #ffffff;
+    padding: 20px;
+    border-radius: 17px;
+    box-shadow: 0 8px 22px rgba(15,23,42,0.05);
+}
+
+div[data-testid="stFormSubmitButton"] button {
+    background: #155be8 !important;
+    color: white !important;
+    border: none !important;
+    padding-left: 22px !important;
+    padding-right: 22px !important;
+}
+
+div[data-testid="stTextInput"] input {
+    border-radius: 12px;
+    min-height: 50px;
+    font-size: 16px;
+}
+
+@media only screen and (max-width: 900px) {
+    .brand-title h1 {
+        font-size: 29px;
     }
-    .header-box {
-        padding: 20px;
+    .brand-subtitle {
+        margin-left: 0;
+    }
+    .hero {
+        padding: 28px 24px;
+    }
+    .hero h2 {
+        font-size: 27px;
+    }
+    .hero-graphic {
+        display: none;
+    }
+    .suggest-grid {
+        grid-template-columns: 1fr;
+    }
+    .avatar-circle {
+        width: 210px;
+        height: 210px;
     }
 }
 </style>
@@ -383,27 +650,40 @@ def submit_query(query):
     })
 
 # =====================================================
-# HEADER WITH LOGO FIX
+# TOP HEADER
 # =====================================================
 
-logo_col, title_col = st.columns([1.0, 4.0])
+st.markdown("<div class='topbar'>", unsafe_allow_html=True)
 
-with logo_col:
-    if LOGO_PATH.exists():
-        st.image(
-            str(LOGO_PATH),
-            use_container_width=True
+h1, h2, h3 = st.columns([1.35, 3.3, 1.25])
+
+with h1:
+    if LOGO_B64:
+        st.markdown(
+            f"<img class='logo-img' src='data:image/png;base64,{LOGO_B64}'>",
+            unsafe_allow_html=True
         )
     else:
-        st.markdown("### KOENIG")
+        st.markdown("## KOENIG")
 
-with title_col:
+with h2:
     st.markdown("""
-    <div class="header-box">
-        <h1>🤖 Koenig Stride</h1>
-        <p>Tax & Entity Nexus Assistant — Step Forward</p>
+    <div class="brand-title">
+        <div class="bot-icon">☻</div>
+        <h1>Koenig Stride</h1>
+    </div>
+    <div class="brand-subtitle">Tax & Entity Nexus Assistant — Step Forward</div>
+    """, unsafe_allow_html=True)
+
+with h3:
+    st.markdown("""
+    <div class="header-actions">
+        <div class="help-pill">❔ Help</div>
+        <div class="user-pill">👤 Sarika · ●</div>
     </div>
     """, unsafe_allow_html=True)
+
+st.markdown("</div>", unsafe_allow_html=True)
 
 if load_error:
     st.error(load_error)
@@ -415,88 +695,111 @@ if client is None:
 # MAIN UI
 # =====================================================
 
-left, right = st.columns([1.15, 3.2])
+left, right = st.columns([1.05, 3.8], gap="large")
 
 with left:
-    st.markdown("<div class='assistant-card'>", unsafe_allow_html=True)
+    st.markdown("<div class='layout-card assistant-card'>", unsafe_allow_html=True)
+    st.markdown("<div class='assistant-name'>👩‍💼 Sarika</div>", unsafe_allow_html=True)
 
-    st.markdown("### 👩‍💼 Sarika")
-
-    if SARIKA_PATH.exists():
-        st.image(str(SARIKA_PATH), use_container_width=True)
+    if SARIKA_B64:
+        st.markdown(f"""
+        <div class="avatar-circle-wrap">
+            <div class="avatar-circle">
+                <img src="data:image/png;base64,{SARIKA_B64}">
+            </div>
+            <span class="status-dot"></span>
+        </div>
+        """, unsafe_allow_html=True)
     else:
         st.info("Sarika image not found.")
 
     st.markdown("<div class='online-pill'>● Sarika is online</div>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown("""
-    <div class="help-list">
-        <b>I can help with:</b><br><br>
-        ✅ Tax FAQs<br>
-        ✅ Salary queries<br>
-        ✅ Entity Nexus<br>
-        ✅ SPOC routing<br>
-        🔒 Protected information routing<br>
-        ✅ Compliance support
+    <div class="layout-card help-card">
+        <h3>I can help with:</h3>
+        <div class="help-line">✅ Tax FAQs</div>
+        <div class="help-line">✅ Salary queries</div>
+        <div class="help-line">✅ Entity Nexus</div>
+        <div class="help-line">✅ SPOC routing</div>
+        <div class="help-line">🔒 Protected information routing</div>
+        <div class="help-line">✅ Compliance support</div>
     </div>
     """, unsafe_allow_html=True)
 
-    st.markdown("</div>", unsafe_allow_html=True)
-
 with right:
-    st.markdown("<div class='chat-card'>", unsafe_allow_html=True)
-    st.markdown("## 💬 Ask Koenig Stride")
+    st.markdown("""
+    <div class="hero">
+        <div>
+            <h2>Welcome to Koenig Stride</h2>
+            <p>Your interactive Tax & Entity Nexus Assistant. Ask me about tax, salary FAQs, entity details, compliance, or SPOC guidance.</p>
+        </div>
+        <div class="hero-graphic">💬</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown("<div class='layout-card main-card'>", unsafe_allow_html=True)
+    st.markdown("<div class='ask-title'>💬 Ask Koenig Stride</div>", unsafe_allow_html=True)
 
     st.markdown("""
-    <div class="bot-bubble">
-        <b>Koenig Stride:</b><br>
-        Hello 👋 I am Koenig Stride, your interactive Tax & Entity Nexus Assistant.
+    <div class="welcome-bubble">
+        👋 Hello! I am Koenig Stride, your interactive Tax & Entity Nexus Assistant.<br>
         Ask me about tax, salary FAQs, entity details, or SPOC guidance.
     </div>
     """, unsafe_allow_html=True)
 
-    st.markdown("#### Suggested Questions")
+    st.markdown("<div class='section-title'>Suggested Questions</div>", unsafe_allow_html=True)
 
-    q1, q2 = st.columns(2)
-    q3, q4 = st.columns(2)
+    s1, s2 = st.columns(2)
+    s3, s4 = st.columns(2)
 
     suggestions = [
+        "🏢 Who handles UAE entity compliance?",
+        "🌐 Tell me about Netherlands entity",
+        "👤 Who is the SPOC for payroll tax issues?",
+        "📄 What changed in income tax this year?"
+    ]
+
+    raw_suggestions = [
         "Who handles UAE entity compliance?",
         "Tell me about Netherlands entity",
         "Who is the SPOC for payroll tax issues?",
         "What changed in income tax this year?"
     ]
 
-    with q1:
-        if st.button(suggestions[0], key="suggest_1"):
-            submit_query(suggestions[0])
+    with s1:
+        if st.button(suggestions[0], key="suggest_1", use_container_width=True):
+            submit_query(raw_suggestions[0])
 
-    with q2:
-        if st.button(suggestions[1], key="suggest_2"):
-            submit_query(suggestions[1])
+    with s2:
+        if st.button(suggestions[1], key="suggest_2", use_container_width=True):
+            submit_query(raw_suggestions[1])
 
-    with q3:
-        if st.button(suggestions[2], key="suggest_3"):
-            submit_query(suggestions[2])
+    with s3:
+        if st.button(suggestions[2], key="suggest_3", use_container_width=True):
+            submit_query(raw_suggestions[2])
 
-    with q4:
-        if st.button(suggestions[3], key="suggest_4"):
-            submit_query(suggestions[3])
+    with s4:
+        if st.button(suggestions[3], key="suggest_4", use_container_width=True):
+            submit_query(raw_suggestions[3])
+
+    st.markdown("</div>", unsafe_allow_html=True)
 
     with st.form("ask_form", clear_on_submit=True):
         user_query = st.text_input(
             "Type your question here",
             placeholder="Example: Who handles UAE entity compliance?"
         )
-        submitted = st.form_submit_button("Ask Koenig Stride", type="primary")
+        submitted = st.form_submit_button("➤ Ask Koenig Stride")
 
     if submitted and user_query.strip():
         with st.spinner("Koenig Stride is thinking..."):
             submit_query(user_query.strip())
 
     if st.session_state.chat_history:
-        st.markdown("---")
-        st.markdown("### Conversation")
+        st.markdown("<div class='layout-card main-card' style='margin-top:16px;'>", unsafe_allow_html=True)
+        st.markdown("<div class='section-title'>Conversation</div>", unsafe_allow_html=True)
 
         for item in reversed(st.session_state.chat_history[-10:]):
             st.markdown(f"""
@@ -535,7 +838,7 @@ with right:
                 </div>
                 """, unsafe_allow_html=True)
 
-    st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
 
 # =====================================================
 # ADMIN PREVIEW
