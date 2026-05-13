@@ -386,7 +386,7 @@ def submit_query(query):
 # HEADER WITH LOGO FIX
 # =====================================================
 
-logo_col, title_col = st.columns([1.2, 4.2])
+logo_col, title_col = st.columns([1.0, 4.0])
 
 with logo_col:
     if LOGO_PATH.exists():
