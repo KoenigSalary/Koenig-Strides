@@ -209,7 +209,7 @@ with col_title:
     st.markdown("""
     <div class="koenig-header">
         <h1 style="margin:0;">Koenig Stride</h1>
-        <p style="margin:4px 0 0 0;">Tax & Entity Nexus Assistant</p>
+        <p style="margin:4px 0 0 0;">Tax & Entity Nexus Support</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -219,7 +219,7 @@ with col_title:
 left, right = st.columns([1.2, 3])
 
 with left:
-    st.markdown("### 👩‍💼 Assistant")
+    st.markdown("### 👩‍💼 Support")
     if SARIKA_PATH.exists():
         st.image(str(SARIKA_PATH), use_container_width=True)
     else:
@@ -311,7 +311,7 @@ with right:
         st.markdown("""
         <div class="chat-box">
             <b>Koenig Stride:</b><br>
-            Hello 👋 I am Koenig Stride, your interactive Tax & Entity Nexus Assistant.
+            Hello 👋 I am Koenig Stride, your interactive Tax & Entity Nexus Support.
             Ask me about tax, salary FAQs, entity details, or SPOC guidance.
         </div>
         """, unsafe_allow_html=True)
