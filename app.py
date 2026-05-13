@@ -8,8 +8,8 @@ import numpy as np
 import base64
 
 # =====================================================
-# KOENIG STRIDE - CATEGORY FAQ + MODERN UI VERSION
-# GPT + Semantic Search + Protected Logic + Category Navigation
+# KOENIG STRIDE - MODULE > CATEGORY > QUESTION UI
+# GPT + Semantic Search + Protected Logic
 # =====================================================
 
 st.set_page_config(
@@ -177,8 +177,8 @@ st.markdown("""
 }
 
 .avatar-circle {
-    width: 245px;
-    height: 245px;
+    width: 230px;
+    height: 230px;
     border-radius: 50%;
     overflow: hidden;
     border: 5px solid #0b4f8a;
@@ -212,29 +212,14 @@ st.markdown("""
     font-weight: 700;
 }
 
-.help-card {
-    padding: 24px;
-}
-
-.help-card h3 {
-    margin: 0 0 20px 0;
-    font-size: 22px;
-}
-
-.help-line {
-    font-size: 17px;
-    margin: 12px 0;
-    color: #111827;
-}
-
 .hero {
-    min-height: 170px;
+    min-height: 155px;
     border-radius: 22px;
     background:
         radial-gradient(circle at 85% 40%, rgba(255,255,255,0.18), transparent 30%),
         linear-gradient(120deg, #071a4f 0%, #063a9e 55%, #1267f1 100%);
     color: white;
-    padding: 42px 46px;
+    padding: 36px 42px;
     box-shadow: var(--shadow);
     margin-bottom: 18px;
     display: flex;
@@ -244,51 +229,87 @@ st.markdown("""
 
 .hero h2 {
     font-size: 34px;
-    margin: 0 0 14px 0;
+    margin: 0 0 12px 0;
     font-weight: 800;
 }
 
 .hero p {
-    font-size: 18px;
-    line-height: 1.6;
+    font-size: 17px;
+    line-height: 1.55;
     margin: 0;
     max-width: 760px;
 }
 
 .hero-graphic {
-    font-size: 76px;
+    font-size: 70px;
     opacity: 0.9;
     margin-right: 15px;
 }
 
 .main-card {
-    padding: 28px 30px;
+    padding: 26px 28px;
 }
 
 .ask-title {
     display: flex;
     align-items: center;
     gap: 12px;
-    font-size: 29px;
+    font-size: 27px;
     font-weight: 800;
-    margin-bottom: 22px;
+    margin-bottom: 20px;
     color: var(--text);
 }
 
 .welcome-bubble {
     background: linear-gradient(180deg, #f8fbff 0%, #eef5ff 100%);
     border: 1px solid var(--border);
-    padding: 20px 24px;
+    padding: 18px 22px;
     border-radius: 17px;
-    font-size: 18px;
+    font-size: 17px;
     line-height: 1.55;
-    margin-bottom: 26px;
+    margin-bottom: 22px;
 }
 
 .section-title {
     font-size: 22px;
     font-weight: 800;
     margin: 10px 0 18px 0;
+}
+
+.module-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+    margin-bottom: 20px;
+}
+
+.module-note {
+    background: #f8fafc;
+    border: 1px dashed #cbd5e1;
+    padding: 13px 16px;
+    border-radius: 14px;
+    color: #334155;
+    margin-bottom: 16px;
+}
+
+.selected-pill {
+    display: inline-block;
+    background: #dbeafe;
+    color: #1e3a8a;
+    border: 1px solid #bfdbfe;
+    padding: 9px 13px;
+    border-radius: 999px;
+    font-weight: 800;
+    margin-bottom: 16px;
+}
+
+.answer-bubble {
+    background: #f0fdf4;
+    padding: 16px 18px;
+    border-radius: 17px;
+    margin: 10px 0 15px 0;
+    border: 1px solid #bbf7d0;
+    font-size: 16px;
 }
 
 .user-bubble {
@@ -309,15 +330,6 @@ st.markdown("""
     font-size: 16px;
 }
 
-.answer-bubble {
-    background: #f0fdf4;
-    padding: 16px 18px;
-    border-radius: 17px;
-    margin: 10px 0 15px 0;
-    border: 1px solid #bbf7d0;
-    font-size: 16px;
-}
-
 .protected-bubble {
     background: #fff7ed;
     padding: 16px 18px;
@@ -335,15 +347,6 @@ st.markdown("""
     font-size: 12px;
 }
 
-.category-help {
-    background: #f8fafc;
-    border: 1px dashed #cbd5e1;
-    padding: 14px 16px;
-    border-radius: 14px;
-    color: #334155;
-    margin-bottom: 18px;
-}
-
 div[data-testid="stExpander"] {
     background: #ffffff;
     border: 1px solid var(--border);
@@ -353,13 +356,14 @@ div[data-testid="stExpander"] {
 }
 
 .stButton > button {
-    border-radius: 13px !important;
-    font-weight: 700 !important;
+    border-radius: 15px !important;
+    font-weight: 800 !important;
     border: 1px solid var(--border) !important;
     background: #ffffff !important;
     color: #111827 !important;
     box-shadow: 0 5px 16px rgba(15,23,42,0.05) !important;
-    min-height: 48px;
+    min-height: 54px;
+    text-align: left !important;
 }
 
 .stButton > button:hover {
@@ -381,6 +385,7 @@ div[data-testid="stFormSubmitButton"] button {
     border: none !important;
     padding-left: 22px !important;
     padding-right: 22px !important;
+    text-align: center !important;
 }
 
 div[data-testid="stTextInput"] input {
@@ -406,8 +411,11 @@ div[data-testid="stTextInput"] input {
         display: none;
     }
     .avatar-circle {
-        width: 210px;
-        height: 210px;
+        width: 205px;
+        height: 205px;
+    }
+    .module-grid {
+        grid-template-columns: 1fr;
     }
 }
 </style>
@@ -466,7 +474,7 @@ def load_knowledge():
 faq_df, load_error = load_knowledge()
 
 # =====================================================
-# HELPER FUNCTIONS
+# HELPERS
 # =====================================================
 
 def safe_col(df, col):
@@ -518,24 +526,59 @@ def get_question_column(df):
             return col
     return None
 
-def get_categories(df):
-    category_col = get_category_column(df)
+def get_module_for_row(row):
+    source = normalize(safe_get(row, "Source"))
+    category = normalize(safe_get(row, "Category"))
+    question = normalize(safe_get(row, "Question"))
+    keywords = normalize(safe_get(row, "Keywords"))
+    combined = " ".join([source, category, question, keywords])
 
-    if category_col is None or df.empty:
+    if is_protected(row):
+        return "Protected Information Routing"
+
+    if "entity" in source or "entity" in combined:
+        return "Entity Nexus"
+
+    if "spoc" in combined:
+        return "SPOC Routing"
+
+    if any(x in combined for x in ["compliance", "tds", "gst", "tax filing", "return", "filing", "deduction", "80c", "80ccd"]):
+        return "Compliance Support"
+
+    if any(x in combined for x in ["salary", "payroll", "ctc", "hra", "nps", "pf", "epf", "take-home", "regime"]):
+        return "Salary Queries"
+
+    return "Tax FAQs"
+
+def add_module_column(df):
+    if df.empty:
+        return df
+    df = df.copy()
+    df["Main Module"] = df.apply(get_module_for_row, axis=1)
+    return df
+
+faq_df = add_module_column(faq_df)
+
+def get_categories_for_module(df, module_name):
+    if df.empty:
         return []
 
+    category_col = get_category_column(df)
+    if category_col is None:
+        return []
+
+    filtered = df[df["Main Module"] == module_name].copy()
+
+    excluded = ["section mapping", "mapping", "section-mapping", ""]
     categories = (
-        df[category_col]
+        filtered[category_col]
         .dropna()
         .astype(str)
         .str.strip()
-        .replace("", np.nan)
-        .dropna()
         .unique()
         .tolist()
     )
 
-    excluded = ["section mapping", "mapping", "section-mapping"]
     categories = [
         c for c in categories
         if c.strip().lower() not in excluded
@@ -544,28 +587,25 @@ def get_categories(df):
     categories.sort(key=lambda x: x.lower())
     return categories
 
-def get_questions_by_category(df, category):
+def get_questions_by_module_category(df, module_name, category):
     category_col = get_category_column(df)
-
     if category_col is None:
         return pd.DataFrame()
 
     filtered = df[
-        df[category_col].astype(str).str.strip().str.lower() == category.strip().lower()
+        (df["Main Module"] == module_name) &
+        (df[category_col].astype(str).str.strip().str.lower() == category.strip().lower())
     ].copy()
 
     question_col = get_question_column(filtered)
     if question_col:
-        filtered = filtered[
-            filtered[question_col].astype(str).str.strip() != ""
-        ]
+        filtered = filtered[filtered[question_col].astype(str).str.strip() != ""]
 
     return filtered
 
 def render_answer_from_row(row):
     if is_protected(row):
         spoc_name, spoc_email = get_spoc(row)
-
         email_line = f"<br><b>Email:</b> {spoc_email}" if spoc_email else ""
 
         st.markdown(f"""
@@ -580,7 +620,6 @@ def render_answer_from_row(row):
 
     else:
         answer = get_answer_text(row)
-
         st.markdown(f"""
         <div class="answer-bubble">
             <b>Koenig Stride Answer:</b><br>
@@ -589,7 +628,7 @@ def render_answer_from_row(row):
         """, unsafe_allow_html=True)
 
 # =====================================================
-# PREPARE SEMANTIC SEARCH DATA
+# SEMANTIC SEARCH
 # =====================================================
 
 if not faq_df.empty:
@@ -678,6 +717,12 @@ Knowledge Base Context:
 
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
+
+if "selected_module" not in st.session_state:
+    st.session_state.selected_module = None
+
+def select_module(module_name):
+    st.session_state.selected_module = module_name
 
 def submit_query(query):
     results = semantic_search(query)
@@ -801,84 +846,91 @@ with left:
     st.markdown("<div class='online-pill'>● Sarika is online</div>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
-    st.markdown("""
-    <div class="layout-card help-card">
-        <h3>I can help with:</h3>
-        <div class="help-line">✅ Tax FAQs</div>
-        <div class="help-line">✅ Salary queries</div>
-        <div class="help-line">✅ Entity Nexus</div>
-        <div class="help-line">✅ SPOC routing</div>
-        <div class="help-line">🔒 Protected information routing</div>
-        <div class="help-line">✅ Compliance support</div>
-    </div>
-    """, unsafe_allow_html=True)
-
 with right:
     st.markdown("""
     <div class="hero">
         <div>
             <h2>Welcome to Koenig Stride</h2>
-            <p>Your interactive Tax & Entity Nexus Assistant. Browse categories or ask your question directly.</p>
+            <p>Select a main area first, then choose a category and question. You can also ask in your own words.</p>
         </div>
         <div class="hero-graphic">💬</div>
     </div>
     """, unsafe_allow_html=True)
 
-    # -------------------------
-    # CATEGORY FAQ NAVIGATION
-    # -------------------------
     st.markdown("<div class='layout-card main-card'>", unsafe_allow_html=True)
-    st.markdown("<div class='ask-title'>📚 Browse Knowledge by Category</div>", unsafe_allow_html=True)
-
+    st.markdown("<div class='ask-title'>🚀 Start Here</div>", unsafe_allow_html=True)
     st.markdown("""
-    <div class="category-help">
-        Click any category to view all related questions. Then click a question to see the answer.
-        Protected answers will show the correct SPOC instead of sensitive details.
+    <div class="module-note">
+        Choose one area below. This avoids showing too many questions at once.
     </div>
     """, unsafe_allow_html=True)
 
-    categories = get_categories(faq_df)
+    modules = [
+        ("✅ Tax FAQs", "Tax FAQs"),
+        ("✅ Salary Queries", "Salary Queries"),
+        ("✅ Entity Nexus", "Entity Nexus"),
+        ("✅ SPOC Routing", "SPOC Routing"),
+        ("🔒 Protected Information Routing", "Protected Information Routing"),
+        ("✅ Compliance Support", "Compliance Support")
+    ]
 
-    if categories:
-        for category in categories:
-            category_df = get_questions_by_category(faq_df, category)
+    m1, m2 = st.columns(2)
+    m3, m4 = st.columns(2)
+    m5, m6 = st.columns(2)
+    cols = [m1, m2, m3, m4, m5, m6]
 
-            if category_df.empty:
-                continue
-
-            with st.expander(f"📂 {category} ({len(category_df)} questions)", expanded=False):
-                question_col = get_question_column(category_df)
-
-                for idx, row in category_df.iterrows():
-                    question = safe_get(row, question_col or "Question")
-
-                    if not question:
-                        continue
-
-                    with st.expander(f"❓ {question}", expanded=False):
-                        render_answer_from_row(row)
-    else:
-        st.info("No categories found in the knowledge base. Please check the Category column in Excel.")
+    for i, (label, value) in enumerate(modules):
+        with cols[i]:
+            if st.button(label, key=f"module_{i}", use_container_width=True):
+                select_module(value)
 
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # -------------------------
-    # CHAT / GPT ASK SECTION
-    # -------------------------
+    selected_module = st.session_state.selected_module
+
+    if selected_module:
+        st.markdown("<div class='layout-card main-card' style='margin-top:16px;'>", unsafe_allow_html=True)
+        st.markdown(f"<span class='selected-pill'>Selected: {selected_module}</span>", unsafe_allow_html=True)
+        st.markdown("<div class='section-title'>Step 2: Select Category</div>", unsafe_allow_html=True)
+
+        categories = get_categories_for_module(faq_df, selected_module)
+
+        if categories:
+            for category in categories:
+                category_df = get_questions_by_module_category(faq_df, selected_module, category)
+
+                if category_df.empty:
+                    continue
+
+                with st.expander(f"📂 {category} ({len(category_df)} questions)", expanded=False):
+                    question_col = get_question_column(category_df)
+
+                    for idx, row in category_df.iterrows():
+                        question = safe_get(row, question_col or "Question")
+
+                        if not question:
+                            continue
+
+                        with st.expander(f"❓ {question}", expanded=False):
+                            render_answer_from_row(row)
+        else:
+            st.info("No categories found under this section. Please check the Category column in Excel.")
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
     st.markdown("<div class='layout-card main-card' style='margin-top:16px;'>", unsafe_allow_html=True)
-    st.markdown("<div class='ask-title'>💬 Ask Koenig Stride</div>", unsafe_allow_html=True)
+    st.markdown("<div class='ask-title'>💬 Ask Koenig Stride Directly</div>", unsafe_allow_html=True)
 
     st.markdown("""
     <div class="welcome-bubble">
-        👋 Hello! I am Koenig Stride, your interactive Tax & Entity Nexus Assistant.<br>
-        You can also ask in your own words below.
+        👋 You can also ask any tax, salary, entity, compliance, or SPOC question in your own words.
     </div>
     """, unsafe_allow_html=True)
 
     with st.form("ask_form", clear_on_submit=True):
         user_query = st.text_input(
             "Type your question here",
-            placeholder="Example: Who handles UAE entity compliance?"
+            placeholder="Example: What is NPS?"
         )
         submitted = st.form_submit_button("➤ Ask Koenig Stride")
 
@@ -938,7 +990,7 @@ with right:
 with st.expander("Admin Preview: Knowledge Base"):
     if not faq_df.empty:
         st.success(f"Knowledge base loaded successfully. Total records: {len(faq_df)}")
-        preview_cols = [c for c in ["Source", "Category", "Question", "Protected", "SPOC Name", "SPOC Email"] if c in faq_df.columns]
+        preview_cols = [c for c in ["Main Module", "Source", "Category", "Question", "Protected", "SPOC Name", "SPOC Email"] if c in faq_df.columns]
         st.dataframe(faq_df[preview_cols], use_container_width=True)
     else:
         st.warning("No knowledge records loaded.")
