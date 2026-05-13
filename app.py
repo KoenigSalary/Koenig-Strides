@@ -8,8 +8,8 @@ import numpy as np
 import base64
 
 # =====================================================
-# KOENIG STRIDE - MODERN UI VERSION
-# GPT + Semantic Search + Protected Logic
+# KOENIG STRIDE - CATEGORY FAQ + MODERN UI VERSION
+# GPT + Semantic Search + Protected Logic + Category Navigation
 # =====================================================
 
 st.set_page_config(
@@ -291,28 +291,6 @@ st.markdown("""
     margin: 10px 0 18px 0;
 }
 
-.suggest-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 16px 22px;
-    margin-bottom: 22px;
-}
-
-.suggest-card {
-    background: #ffffff;
-    border: 1px solid var(--border);
-    border-radius: 15px;
-    padding: 16px 18px;
-    box-shadow: 0 5px 16px rgba(15,23,42,0.05);
-    font-size: 17px;
-    color: #111827;
-}
-
-.input-card {
-    padding: 24px;
-    margin-top: 12px;
-}
-
 .user-bubble {
     background: #dbeafe;
     padding: 16px 18px;
@@ -331,6 +309,15 @@ st.markdown("""
     font-size: 16px;
 }
 
+.answer-bubble {
+    background: #f0fdf4;
+    padding: 16px 18px;
+    border-radius: 17px;
+    margin: 10px 0 15px 0;
+    border: 1px solid #bbf7d0;
+    font-size: 16px;
+}
+
 .protected-bubble {
     background: #fff7ed;
     padding: 16px 18px;
@@ -346,6 +333,23 @@ st.markdown("""
 .small-text {
     color: var(--muted);
     font-size: 12px;
+}
+
+.category-help {
+    background: #f8fafc;
+    border: 1px dashed #cbd5e1;
+    padding: 14px 16px;
+    border-radius: 14px;
+    color: #334155;
+    margin-bottom: 18px;
+}
+
+div[data-testid="stExpander"] {
+    background: #ffffff;
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    box-shadow: 0 5px 16px rgba(15,23,42,0.04);
+    margin-bottom: 10px;
 }
 
 .stButton > button {
@@ -400,9 +404,6 @@ div[data-testid="stTextInput"] input {
     }
     .hero-graphic {
         display: none;
-    }
-    .suggest-grid {
-        grid-template-columns: 1fr;
     }
     .avatar-circle {
         width: 210px;
@@ -502,6 +503,90 @@ def get_spoc(row):
     spoc_name = safe_get(row, "SPOC Name", "Relevant SPOC")
     spoc_email = safe_get(row, "SPOC Email", "")
     return spoc_name, spoc_email
+
+def get_category_column(df):
+    possible_cols = ["Category", "Section", "Topic", "Module"]
+    for col in possible_cols:
+        if col in df.columns:
+            return col
+    return None
+
+def get_question_column(df):
+    possible_cols = ["Question", "Questions", "FAQ", "Query"]
+    for col in possible_cols:
+        if col in df.columns:
+            return col
+    return None
+
+def get_categories(df):
+    category_col = get_category_column(df)
+
+    if category_col is None or df.empty:
+        return []
+
+    categories = (
+        df[category_col]
+        .dropna()
+        .astype(str)
+        .str.strip()
+        .replace("", np.nan)
+        .dropna()
+        .unique()
+        .tolist()
+    )
+
+    excluded = ["section mapping", "mapping", "section-mapping"]
+    categories = [
+        c for c in categories
+        if c.strip().lower() not in excluded
+    ]
+
+    categories.sort(key=lambda x: x.lower())
+    return categories
+
+def get_questions_by_category(df, category):
+    category_col = get_category_column(df)
+
+    if category_col is None:
+        return pd.DataFrame()
+
+    filtered = df[
+        df[category_col].astype(str).str.strip().str.lower() == category.strip().lower()
+    ].copy()
+
+    question_col = get_question_column(filtered)
+    if question_col:
+        filtered = filtered[
+            filtered[question_col].astype(str).str.strip() != ""
+        ]
+
+    return filtered
+
+def render_answer_from_row(row):
+    if is_protected(row):
+        spoc_name, spoc_email = get_spoc(row)
+
+        email_line = f"<br><b>Email:</b> {spoc_email}" if spoc_email else ""
+
+        st.markdown(f"""
+        <div class="protected-bubble">
+            <b>🔒 Protected Information</b><br>
+            This information is protected and cannot be displayed here.<br><br>
+            Please contact the designated SPOC:<br>
+            <b>SPOC:</b> {spoc_name}
+            {email_line}
+        </div>
+        """, unsafe_allow_html=True)
+
+    else:
+        answer = get_answer_text(row)
+
+        st.markdown(f"""
+        <div class="answer-bubble">
+            <b>Koenig Stride Answer:</b><br>
+            {answer}
+        </div>
+        """, unsafe_allow_html=True)
 
 # =====================================================
 # PREPARE SEMANTIC SEARCH DATA
@@ -733,58 +818,62 @@ with right:
     <div class="hero">
         <div>
             <h2>Welcome to Koenig Stride</h2>
-            <p>Your interactive Tax & Entity Nexus Assistant. Ask me about tax, salary FAQs, entity details, compliance, or SPOC guidance.</p>
+            <p>Your interactive Tax & Entity Nexus Assistant. Browse categories or ask your question directly.</p>
         </div>
         <div class="hero-graphic">💬</div>
     </div>
     """, unsafe_allow_html=True)
 
+    # -------------------------
+    # CATEGORY FAQ NAVIGATION
+    # -------------------------
     st.markdown("<div class='layout-card main-card'>", unsafe_allow_html=True)
+    st.markdown("<div class='ask-title'>📚 Browse Knowledge by Category</div>", unsafe_allow_html=True)
+
+    st.markdown("""
+    <div class="category-help">
+        Click any category to view all related questions. Then click a question to see the answer.
+        Protected answers will show the correct SPOC instead of sensitive details.
+    </div>
+    """, unsafe_allow_html=True)
+
+    categories = get_categories(faq_df)
+
+    if categories:
+        for category in categories:
+            category_df = get_questions_by_category(faq_df, category)
+
+            if category_df.empty:
+                continue
+
+            with st.expander(f"📂 {category} ({len(category_df)} questions)", expanded=False):
+                question_col = get_question_column(category_df)
+
+                for idx, row in category_df.iterrows():
+                    question = safe_get(row, question_col or "Question")
+
+                    if not question:
+                        continue
+
+                    with st.expander(f"❓ {question}", expanded=False):
+                        render_answer_from_row(row)
+    else:
+        st.info("No categories found in the knowledge base. Please check the Category column in Excel.")
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # -------------------------
+    # CHAT / GPT ASK SECTION
+    # -------------------------
+    st.markdown("<div class='layout-card main-card' style='margin-top:16px;'>", unsafe_allow_html=True)
     st.markdown("<div class='ask-title'>💬 Ask Koenig Stride</div>", unsafe_allow_html=True)
 
     st.markdown("""
     <div class="welcome-bubble">
         👋 Hello! I am Koenig Stride, your interactive Tax & Entity Nexus Assistant.<br>
-        Ask me about tax, salary FAQs, entity details, or SPOC guidance.
+        You can also ask in your own words below.
     </div>
     """, unsafe_allow_html=True)
-
-    st.markdown("<div class='section-title'>Suggested Questions</div>", unsafe_allow_html=True)
-
-    s1, s2 = st.columns(2)
-    s3, s4 = st.columns(2)
-
-    suggestions = [
-        "🏢 Who handles UAE entity compliance?",
-        "🌐 Tell me about Netherlands entity",
-        "👤 Who is the SPOC for payroll tax issues?",
-        "📄 What changed in income tax this year?"
-    ]
-
-    raw_suggestions = [
-        "Who handles UAE entity compliance?",
-        "Tell me about Netherlands entity",
-        "Who is the SPOC for payroll tax issues?",
-        "What changed in income tax this year?"
-    ]
-
-    with s1:
-        if st.button(suggestions[0], key="suggest_1", use_container_width=True):
-            submit_query(raw_suggestions[0])
-
-    with s2:
-        if st.button(suggestions[1], key="suggest_2", use_container_width=True):
-            submit_query(raw_suggestions[1])
-
-    with s3:
-        if st.button(suggestions[2], key="suggest_3", use_container_width=True):
-            submit_query(raw_suggestions[2])
-
-    with s4:
-        if st.button(suggestions[3], key="suggest_4", use_container_width=True):
-            submit_query(raw_suggestions[3])
-
-    st.markdown("</div>", unsafe_allow_html=True)
 
     with st.form("ask_form", clear_on_submit=True):
         user_query = st.text_input(
@@ -796,6 +885,8 @@ with right:
     if submitted and user_query.strip():
         with st.spinner("Koenig Stride is thinking..."):
             submit_query(user_query.strip())
+
+    st.markdown("</div>", unsafe_allow_html=True)
 
     if st.session_state.chat_history:
         st.markdown("<div class='layout-card main-card' style='margin-top:16px;'>", unsafe_allow_html=True)
