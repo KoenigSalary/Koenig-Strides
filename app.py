@@ -700,21 +700,21 @@ def login_screen():
     # Login-page-specific styling (centered single card, original brand colors)
     st.markdown("""
     <style>
-    .login-page-bg {
-        margin-top: -10px;
-    }
+    .login-page-bg { margin-top: -20px; }
+    /* Tighten Streamlit's default vertical spacing on the login screen */
+    .block-container { padding-top: 0.5rem !important; }
     .login-stack {
-        max-width: 520px;
-        margin: 10px auto 0 auto;
+        max-width: 500px;
+        margin: 0 auto;
         text-align: center;
     }
     .login-logo-wrap {
         text-align: center;
-        margin-bottom: 18px;
+        margin-bottom: 6px;
     }
     .login-logo-wrap img {
-        width: 240px;
-        max-width: 70%;
+        width: 170px;
+        max-width: 60%;
         height: auto;
         display: inline-block;
     }
@@ -722,126 +722,140 @@ def login_screen():
         display: flex;
         align-items: center;
         justify-content: center;
-        gap: 14px;
-        margin-bottom: 6px;
+        gap: 10px;
+        margin-bottom: 2px;
     }
     .login-title-icon {
         background: linear-gradient(135deg,#155be8,#0b3ba7);
         color: white;
-        height: 48px;
-        width: 48px;
-        min-width: 48px;
+        height: 36px; width: 36px; min-width: 36px;
         border-radius: 50%;
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        font-weight: 900;
-        font-size: 22px;
-        box-shadow: 0 6px 16px rgba(21,91,232,.32);
+        display: inline-flex; align-items: center; justify-content: center;
+        font-weight: 900; font-size: 17px;
+        box-shadow: 0 4px 12px rgba(21,91,232,.30);
     }
     .login-title-text {
-        font-size: 34px;
+        font-size: 24px;
         font-weight: 900;
         color: #04123d;
-        letter-spacing: -0.4px;
+        letter-spacing: -0.3px;
         margin: 0;
         line-height: 1.1;
     }
     .login-subtitle {
         color: #334155;
-        font-size: 14px;
+        font-size: 12px;
         font-weight: 600;
-        margin: 0 0 22px 0;
+        margin: 0 0 12px 0;
     }
     .login-hero-card {
         background:
             radial-gradient(circle at 86% 42%, rgba(255,255,255,.18), transparent 32%),
             linear-gradient(135deg,#04123d 0%,#0a3aae 55%,#155be8 100%);
         color: white;
-        padding: 28px 30px;
-        border-radius: 20px;
-        box-shadow: 0 14px 36px rgba(15,23,42,.18);
-        margin: 0 auto 24px auto;
-        max-width: 520px;
+        padding: 16px 22px;
+        border-radius: 16px;
+        box-shadow: 0 10px 28px rgba(15,23,42,.16);
+        margin: 0 auto 14px auto;
+        max-width: 500px;
         text-align: center;
     }
     .login-hero-card h2 {
         color: white;
-        font-size: 24px;
-        margin: 0 0 8px 0;
+        font-size: 18px;
+        margin: 0 0 4px 0;
         font-weight: 900;
-        letter-spacing: -0.3px;
+        letter-spacing: -0.2px;
     }
     .login-hero-card p {
         color: white;
-        font-size: 15px;
+        font-size: 13px;
         margin: 0;
         opacity: 0.95;
-        line-height: 1.5;
+        line-height: 1.4;
     }
     .sarika-wrap {
         text-align: center;
-        margin: 10px auto 18px auto;
+        margin: 4px auto 10px auto;
     }
     .sarika-wrap img {
-        width: 130px;
-        height: 130px;
+        width: 78px; height: 78px;
         border-radius: 50%;
         object-fit: cover;
-        border: 4px solid #1471d8;
-        box-shadow: 0 8px 22px rgba(15,23,42,.18);
+        border: 3px solid #1471d8;
+        box-shadow: 0 6px 16px rgba(15,23,42,.18);
     }
     .sarika-caption {
-        margin-top: 10px;
+        margin-top: 4px;
         font-weight: 800;
         color: #0b3ba7;
-        font-size: 15px;
+        font-size: 13px;
     }
     .sarika-online {
         color: #15803d;
         font-weight: 700;
-        font-size: 13px;
-        margin-top: 2px;
+        font-size: 11px;
+        margin-top: 1px;
     }
     .login-form-card {
         background: white;
         border: 1px solid var(--border);
-        border-radius: 20px;
-        box-shadow: 0 16px 40px rgba(15,23,42,.10);
-        padding: 28px 30px;
-        max-width: 520px;
-        margin: 0 auto 18px auto;
+        border-radius: 16px;
+        box-shadow: 0 12px 30px rgba(15,23,42,.08);
+        padding: 18px 22px;
+        max-width: 500px;
+        margin: 0 auto 10px auto;
     }
     .login-form-heading {
-        font-size: 18px;
+        font-size: 15px;
         font-weight: 800;
         color: #04123d;
-        margin: 0 0 14px 0;
+        margin: 0 0 8px 0;
         text-align: left;
+    }
+    /* Compact form inputs inside the login form */
+    .login-form-card div[data-testid="stTextInput"] { margin-bottom: 6px; }
+    .login-form-card div[data-testid="stTextInput"] input {
+        min-height: 40px !important;
+        font-size: 14px !important;
+        padding: 6px 12px !important;
+    }
+    .login-form-card div[data-testid="stTextInput"] label p {
+        font-size: 13px !important;
+        margin-bottom: 2px !important;
+    }
+    .login-form-card div[data-testid="stRadio"] { margin-bottom: 6px; }
+    .login-form-card div[data-testid="stRadio"] label p {
+        font-size: 13px !important;
+    }
+    .login-form-card .stButton > button {
+        min-height: 44px !important;
+        font-size: 14px !important;
+        margin-top: 6px;
     }
     .login-help-foot {
         text-align: center;
         color: #64748b;
-        font-size: 13px;
-        margin-top: 6px;
-        line-height: 1.6;
+        font-size: 12px;
+        margin-top: 2px;
+        line-height: 1.5;
     }
     .login-help-foot b { color: #0b3ba7; }
 
     @media only screen and (max-width: 600px) {
-        .login-title-text { font-size: 26px; }
-        .login-hero-card { padding: 22px 20px; }
-        .login-hero-card h2 { font-size: 20px; }
-        .login-form-card { padding: 22px 18px; }
-        .login-logo-wrap img { width: 200px; }
-        .sarika-wrap img { width: 110px; height: 110px; }
+        .login-title-text { font-size: 20px; }
+        .login-hero-card { padding: 14px 16px; }
+        .login-hero-card h2 { font-size: 16px; }
+        .login-form-card { padding: 16px 14px; }
+        .login-logo-wrap img { width: 140px; }
+        .sarika-wrap img { width: 68px; height: 68px; }
     }
     </style>
     <div class='login-page-bg'></div>
     """, unsafe_allow_html=True)
 
-    # Centered column wrapper
-    spacer_l, center, spacer_r = st.columns([1, 3, 1])
+    # Centered column wrapper (wider side spacers => narrower center => more compact look)
+    spacer_l, center, spacer_r = st.columns([1, 2, 1])
 
     with center:
         # 1. Logo (original color, untouched)
