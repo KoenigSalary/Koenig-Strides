@@ -640,23 +640,36 @@ def authenticate_user(user_id, password):
     df = load_users()
     match = df[df["user_id"].astype(str) == user_id]
 
+    # Auto-create numeric employee on first attempt
+    if match.empty and user_id.isdigit():
+        ensure_employee_exists(user_id)
+        df = load_users()
+        match = df[df["user_id"].astype(str) == user_id]
+
     if match.empty:
-        if user_id.isdigit():
-            ensure_employee_exists(user_id)
-            df = load_users()
-            match = df[df["user_id"].astype(str) == user_id]
-        else:
-            return False, "User not found.", None
+        return False, "User not found.", None
 
     row = match.iloc[0]
 
     if not bool_from_str(row.get("active", "True")):
         return False, "This user is inactive. Please contact admin.", None
 
-    if row["password_hash"] != hash_password(password):
-        return False, "Invalid password.", None
+    # Standard password check
+    if row["password_hash"] == hash_password(password):
+        return True, "", row
 
-    return True, "", row
+    # Fallback: if the employee enters the default password Welcome@123,
+    # reset their stored hash to default and let them log in (they will be
+    # forced to change password on next step because first_login=True).
+    # This guarantees the default password always works for employees.
+    if user_id.isdigit() and password == DEFAULT_EMPLOYEE_PASSWORD:
+        update_user_password(user_id, DEFAULT_EMPLOYEE_PASSWORD, first_login=True)
+        df = load_users()
+        refreshed = df[df["user_id"].astype(str) == user_id]
+        if not refreshed.empty:
+            return True, "", refreshed.iloc[0]
+
+    return False, "Invalid password.", None
 
 def update_user_password(user_id, new_password, first_login=False):
     df = load_users()
@@ -1361,35 +1374,73 @@ with right:
             st.info("No categories found under this section. Please check the Category column in Excel.")
         st.markdown("</div>", unsafe_allow_html=True)
 
-    st.markdown("## 💬 Ask Koenig Stride Directly")
-    with st.form("ask_form", clear_on_submit=True):
-        query = st.text_input("Type your question here", placeholder="Example: What is NPS?")
-        submitted = st.form_submit_button("➤ Ask Koenig Stride")
-    if submitted and query.strip():
-        with st.spinner("Koenig Stride is thinking..."):
-            submit_query(query.strip())
+    # =====================================================
+    # CHAT WIDGET (proper st.chat_message style)
+    # =====================================================
+    st.markdown("## 💬 Ask Koenig Stride")
+    st.markdown(
+        "<div style='color:#64748b; font-size:13px; margin-top:-8px; margin-bottom:12px;'>"
+        "Chat directly with Sarika — your AI assistant for tax, salary, labour code and SPOC queries."
+        "</div>",
+        unsafe_allow_html=True
+    )
 
+    # Chat container (scrollable area)
+    chat_container = st.container()
+
+    with chat_container:
+        if not st.session_state.chat_history:
+            # Greeting bubble when there are no messages yet
+            with st.chat_message("assistant", avatar="👩‍💼"):
+                st.markdown(
+                    f"Hi **{st.session_state.employee_name}** 👋  \n"
+                    "I'm **Sarika**, your Koenig Stride assistant. "
+                    "Ask me anything about **Tax, Salary, Labour Code, Entity Nexus** or **SPOC routing**. "
+                    "You can also click **🚀 Start Here** above to browse guided FAQs."
+                )
+        else:
+            for item in st.session_state.chat_history[-30:]:
+                # User message
+                with st.chat_message("user", avatar="👤"):
+                    st.markdown(item["query"])
+
+                # Assistant message
+                with st.chat_message("assistant", avatar="👩‍💼"):
+                    if item["type"] == "protected":
+                        email_html = f"<br><b>Email:</b> {item.get('email','')}" if item.get("email") else ""
+                        st.markdown(f"""
+                        <div class='protected-box' style='margin:0;'>
+                        <b>🔒 Protected Information</b><br>
+                        {item['answer']}<br><br>
+                        Please contact:<br>
+                        <b>SPOC:</b> {item.get('spoc','Relevant SPOC')}
+                        {email_html}
+                        </div>
+                        """, unsafe_allow_html=True)
+                    else:
+                        st.markdown(item["answer"])
+
+                    # Admin-only metadata
+                    if st.session_state.role == "Admin":
+                        st.caption(
+                            f"Source: {item.get('source','')} · "
+                            f"Similarity: {item.get('similarity',0):.2f}"
+                        )
+
+    # Bottom chat input (always at the bottom, widget-style)
+    user_query = st.chat_input("Type your question and press Enter… (e.g. What is NPS?)")
+    if user_query and user_query.strip():
+        with st.spinner("Sarika is thinking…"):
+            submit_query(user_query.strip())
+        st.rerun()
+
+    # Small action row below chat input
     if st.session_state.chat_history:
-        st.markdown("<div class='card'>", unsafe_allow_html=True)
-        st.markdown("### Conversation")
-        for item in reversed(st.session_state.chat_history[-10:]):
-            st.markdown(f"<div class='user-bubble'><b>You:</b><br>{item['query']}</div>", unsafe_allow_html=True)
-            if item["type"] == "protected":
-                email_html = f"<br><b>Email:</b> {item.get('email','')}" if item.get("email") else ""
-                st.markdown(f"""
-                <div class='protected-box'>
-                <b>🔒 Koenig Stride:</b><br>
-                {item['answer']}<br><br>
-                Please contact:<br>
-                <b>SPOC:</b> {item.get('spoc','Relevant SPOC')}
-                {email_html}<br><br>
-                <span class='small-text'>Source: {item.get('source','')} | Similarity: {item.get('similarity',0):.2f}</span>
-                </div>
-                """, unsafe_allow_html=True)
-            else:
-                meta = f"<br><br><span class='small-text'>Source: {item.get('source','')} | Similarity: {item.get('similarity',0):.2f}</span>" if st.session_state.role == "Admin" else ""
-                st.markdown(f"<div class='bot-bubble'><b>Koenig Stride:</b><br>{item['answer']}{meta}</div>", unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
+        col_clear, _ = st.columns([1, 4])
+        with col_clear:
+            if st.button("🗑️ Clear chat", use_container_width=True):
+                st.session_state.chat_history = []
+                st.rerun()
 
 # =====================================================
 # ADMIN
