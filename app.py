@@ -1017,7 +1017,26 @@ def load_knowledge():
     except Exception as e:
         return pd.DataFrame(), str(e)
 
+@st.cache_data
+def load_spoc_master():
+    """Load the SPOC Master sheet — used exclusively by the SPOC Routing module."""
+    if not EXCEL_PATH.exists():
+        return pd.DataFrame()
+    try:
+        xl = pd.ExcelFile(EXCEL_PATH)
+        if "SPOC Master" not in xl.sheet_names:
+            return pd.DataFrame()
+        df = pd.read_excel(EXCEL_PATH, sheet_name="SPOC Master").fillna("")
+        # Standardise column names — trim whitespace
+        df.columns = [str(c).strip() for c in df.columns]
+        # Drop completely empty rows
+        df = df[df.apply(lambda r: any(str(v).strip() for v in r.values), axis=1)].reset_index(drop=True)
+        return df
+    except Exception:
+        return pd.DataFrame()
+
 faq_df, load_error = load_knowledge()
+spoc_df = load_spoc_master()
 
 def safe_get(row, col, default=""):
     try:
@@ -1070,8 +1089,9 @@ def get_module_for_row(row):
         return "Salary Queries"
     if category in TAX_CATEGORIES:
         return "Tax FAQs"
-    if "spoc" in combined or "contact" in combined or "who handles" in combined:
-        return "SPOC Routing"
+    # NOTE: SPOC Routing module is now powered exclusively by the SPOC Master
+    # sheet via render_spoc_routing(). FAQ rows are no longer routed here
+    # — they will fall through to Entity Nexus / Compliance / Tax instead.
     if is_protected(row):
         return "Protected Information Routing"
     if "entity" in source or "entity" in combined:
@@ -1081,6 +1101,81 @@ def get_module_for_row(row):
     if any(x in combined for x in ["salary","payroll","ctc","reimbursement"]):
         return "Salary Queries"
     return "Tax FAQs"
+
+def render_spoc_routing():
+    """Render the SPOC Routing module — sourced ONLY from the SPOC Master sheet."""
+    if spoc_df.empty:
+        st.warning("SPOC Master sheet not found in the knowledge file.")
+        return
+
+    # Resolve column names defensively
+    topic_col = next((c for c in spoc_df.columns if "topic" in c.lower() or "entity" in c.lower()), spoc_df.columns[0])
+    name_col = next((c for c in spoc_df.columns if "name" in c.lower()), None)
+    email_col = next((c for c in spoc_df.columns if "email" in c.lower()), None)
+
+    st.markdown(
+        "<div style='color:#475569; font-size:14px; margin-bottom:14px;'>"
+        "Below is the official list of <b>Single Points of Contact (SPOCs)</b> for each topic and entity. "
+        "For any query, please reach out to the relevant SPOC directly."
+        "</div>",
+        unsafe_allow_html=True
+    )
+
+    # Group SPOCs by name for a clean grouped view
+    if name_col:
+        try:
+            grouped = spoc_df.groupby(name_col, sort=False)
+            for spoc_name, group in grouped:
+                spoc_name_str = str(spoc_name).strip() or "Unassigned"
+                email = ""
+                if email_col:
+                    emails = [str(e).strip() for e in group[email_col].tolist() if str(e).strip()]
+                    email = emails[0] if emails else ""
+                topics = [str(t).strip() for t in group[topic_col].tolist() if str(t).strip()]
+
+                topic_html = "".join(
+                    f"<li style='margin:4px 0; color:#1e293b;'>{t}</li>" for t in topics
+                )
+                email_html = (
+                    f"<a href='mailto:{email}' style='color:#0b55d9; text-decoration:none; font-weight:700;'>{email}</a>"
+                    if email else "<span style='color:#94a3b8;'>(no email on file)</span>"
+                )
+                st.markdown(f"""
+                <div style='background:#ffffff; border:1px solid #dbe3ef; border-left:5px solid #155be8;
+                            border-radius:14px; padding:16px 18px; margin-bottom:12px;
+                            box-shadow:0 6px 18px rgba(15,23,42,.06);'>
+                    <div style='display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;'>
+                        <div style='font-size:17px; font-weight:800; color:#04123d;'>
+                            👤 {spoc_name_str}
+                        </div>
+                        <div style='font-size:13px;'>✉️ {email_html}</div>
+                    </div>
+                    <div style='margin-top:10px; font-size:13px; color:#64748b; font-weight:700;
+                                text-transform:uppercase; letter-spacing:.4px;'>
+                        Topics / Entities handled ({len(topics)})
+                    </div>
+                    <ul style='margin:6px 0 0 18px; padding:0; font-size:14px;'>{topic_html}</ul>
+                </div>
+                """, unsafe_allow_html=True)
+        except Exception:
+            # Fallback: show plain table
+            st.dataframe(spoc_df, use_container_width=True)
+    else:
+        st.dataframe(spoc_df, use_container_width=True)
+
+    # Searchable quick lookup
+    with st.expander("🔍 Quick lookup — search by topic, entity, name or email", expanded=False):
+        q = st.text_input("Search", placeholder="e.g. UAE, Tax, Ritika…", key="spoc_search")
+        if q and q.strip():
+            q_norm = q.strip().lower()
+            mask = spoc_df.apply(
+                lambda r: any(q_norm in str(v).lower() for v in r.values), axis=1
+            )
+            results = spoc_df[mask]
+            if results.empty:
+                st.info("No matching SPOC found.")
+            else:
+                st.dataframe(results, use_container_width=True, hide_index=True)
 
 if not faq_df.empty:
     faq_df = faq_df.copy()
@@ -1355,23 +1450,29 @@ with right:
         selected = st.session_state.selected_module
         st.markdown("<div class='card'>", unsafe_allow_html=True)
         st.markdown(f"<span class='selected-pill'>Selected: {selected}</span>", unsafe_allow_html=True)
-        st.markdown("### Select Category")
-        categories = get_categories_for_module(faq_df, selected)
-        if categories:
-            for category in categories:
-                cat_df = get_questions_by_module_category(faq_df, selected, category)
-                if cat_df.empty:
-                    continue
-                with st.expander(f"📂 {category} ({len(cat_df)} questions)", expanded=False):
-                    q_col = get_question_column(cat_df)
-                    for _, row in cat_df.iterrows():
-                        question = safe_get(row, q_col or "Question")
-                        if not question:
-                            continue
-                        with st.expander(f"❓ {question}", expanded=False):
-                            render_answer(row)
+
+        # SPOC Routing is powered exclusively by the SPOC Master sheet
+        if selected == "SPOC Routing":
+            st.markdown("### 📞 SPOC Directory")
+            render_spoc_routing()
         else:
-            st.info("No categories found under this section. Please check the Category column in Excel.")
+            st.markdown("### Select Category")
+            categories = get_categories_for_module(faq_df, selected)
+            if categories:
+                for category in categories:
+                    cat_df = get_questions_by_module_category(faq_df, selected, category)
+                    if cat_df.empty:
+                        continue
+                    with st.expander(f"📂 {category} ({len(cat_df)} questions)", expanded=False):
+                        q_col = get_question_column(cat_df)
+                        for _, row in cat_df.iterrows():
+                            question = safe_get(row, q_col or "Question")
+                            if not question:
+                                continue
+                            with st.expander(f"❓ {question}", expanded=False):
+                                render_answer(row)
+            else:
+                st.info("No categories found under this section. Please check the Category column in Excel.")
         st.markdown("</div>", unsafe_allow_html=True)
 
     # =====================================================
