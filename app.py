@@ -1,3 +1,4 @@
+
 import streamlit as st
 import pandas as pd
 from pathlib import Path
@@ -14,8 +15,8 @@ except Exception:
     AI_AVAILABLE = False
 
 # =====================================================
-# KOENIG STRIDE - COMPLETE BLUE UI
-# Logo + Sarika + Start Here + Module > Category > Question + Chat
+# KOENIG STRIDE - COMPLETE APP WITH LOGIN
+# Admin + Employee Login + Logo + Sarika + Blue UI + Chat
 # =====================================================
 
 st.set_page_config(
@@ -24,19 +25,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed"
 )
-
-# =====================================================
-# SESSION STATE
-# =====================================================
-
-if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
-
-if "role" not in st.session_state:
-    st.session_state.role = None
-
-if "employee_id" not in st.session_state:
-    st.session_state.employee_id = None
 
 # =====================================================
 # PATHS
@@ -349,6 +337,26 @@ div[data-testid="stExpander"] {
     .hero h2 { font-size:28px; }
     .hero-graphic { display:none; }
     .avatar-img { width:200px; height:200px; }
+}
+
+.login-box {
+    background:white;
+    padding:40px;
+    border-radius:24px;
+    box-shadow:0 14px 35px rgba(15,23,42,0.10);
+    margin-top:50px;
+    border:1px solid var(--border);
+}
+.login-title {
+    background: linear-gradient(135deg, var(--blue-dark), var(--blue));
+    color:white;
+    padding:24px;
+    border-radius:18px;
+    margin-bottom:20px;
+}
+.login-title h1 {
+    margin:0;
+    font-size:32px;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -664,6 +672,18 @@ Knowledge Base:
 # SESSION STATE
 # =====================================================
 
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+
+if "role" not in st.session_state:
+    st.session_state.role = None
+
+if "employee_id" not in st.session_state:
+    st.session_state.employee_id = None
+
+if "employee_name" not in st.session_state:
+    st.session_state.employee_name = None
+
 if "menu_open" not in st.session_state:
     st.session_state.menu_open = False
 
@@ -672,6 +692,78 @@ if "selected_module" not in st.session_state:
 
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
+
+# =====================================================
+# LOGIN SYSTEM
+# =====================================================
+
+ADMIN_USERNAME = "admin"
+ADMIN_PASSWORD = "admin123"
+
+def login_screen():
+    col1, col2, col3 = st.columns([1, 2, 1])
+
+    with col2:
+        if LOGO_B64:
+            st.markdown(
+                f"<div style='text-align:center; margin-bottom:20px;'><img src='data:image/png;base64,{LOGO_B64}' style='width:230px;'></div>",
+                unsafe_allow_html=True
+            )
+
+        st.markdown("<div class='login-box'>", unsafe_allow_html=True)
+
+        st.markdown("""
+        <div class='login-title'>
+            <h1>🔐 Koenig Stride Login</h1>
+            <p style='margin:6px 0 0 0;'>Tax & Entity Nexus Assistant</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        login_type = st.selectbox("Login As", ["Employee", "Admin"])
+
+        if login_type == "Employee":
+            emp_id = st.text_input("Enter Employee ID", placeholder="Example: 1001")
+            employee_name = f"Employee {emp_id}" if emp_id.strip().isdigit() else ""
+
+            if st.button("Employee Login", use_container_width=True):
+                if emp_id.strip().isdigit():
+                    st.session_state.logged_in = True
+                    st.session_state.role = "Employee"
+                    st.session_state.employee_id = emp_id
+                    st.session_state.employee_name = employee_name
+                    st.rerun()
+                else:
+                    st.error("Please enter a valid numeric Employee ID")
+
+        else:
+            username = st.text_input("Admin Username")
+            password = st.text_input("Password", type="password")
+
+            if st.button("Admin Login", use_container_width=True):
+                if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+                    st.session_state.logged_in = True
+                    st.session_state.role = "Admin"
+                    st.session_state.employee_id = "ADMIN"
+                    st.session_state.employee_name = "Admin"
+                    st.rerun()
+                else:
+                    st.error("Invalid admin credentials")
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+if not st.session_state.logged_in:
+    login_screen()
+    st.stop()
+
+def logout():
+    st.session_state.logged_in = False
+    st.session_state.role = None
+    st.session_state.employee_id = None
+    st.session_state.employee_name = None
+    st.session_state.menu_open = False
+    st.session_state.selected_module = None
+    st.session_state.chat_history = []
+    st.rerun()
 
 def submit_query(query):
     results = semantic_search(query)
@@ -745,20 +837,25 @@ with h2:
     """, unsafe_allow_html=True)
 
 with h3:
-    st.markdown("<div class='user-pill'>👤 Sarika · ●</div>", unsafe_allow_html=True)
+    role = st.session_state.role
+    emp_id = st.session_state.employee_id
+    emp_name = st.session_state.employee_name
+    st.markdown(f"""
+    <div class='user-pill'>
+    👤 {emp_name}<br>
+    <span style='font-size:12px;color:#64748b;'>Role: {role} · ID: {emp_id}</span>
+    </div>
+    """, unsafe_allow_html=True)
 
 st.markdown("</div>", unsafe_allow_html=True)
 
+logout_col1, logout_col2 = st.columns([6, 1])
+with logout_col2:
+    if st.button("Logout", use_container_width=True):
+        logout()
+
 if load_error:
     st.error(load_error)
-
-# =====================================================
-# LOGIN CHECK
-# =====================================================
-
-if not st.session_state.logged_in:
-    login_screen()
-    st.stop()
 
 # =====================================================
 # MAIN UI
@@ -795,7 +892,9 @@ with right:
     """, unsafe_allow_html=True)
 
     st.markdown("<div class='layout-card'>", unsafe_allow_html=True)
-    
+    st.markdown("<div class='ask-title'>🚀 Start Here</div>", unsafe_allow_html=True)
+    st.markdown("<div class='info-box'>Click Start Here to open guided help categories.</div>", unsafe_allow_html=True)
+
     if st.button("🚀 Start Here", use_container_width=True):
         st.session_state.menu_open = True
 
@@ -881,109 +980,36 @@ with right:
                 </div>
                 """, unsafe_allow_html=True)
             else:
+                meta = f"<br><br><span class='small-text'>Source: {item.get('source','')} | Similarity: {item.get('similarity',0):.2f}</span>" if st.session_state.role == "Admin" else ""
                 st.markdown(f"""
                 <div class='bot-bubble'>
                 <b>Koenig Stride:</b><br>
-                {item['answer']}<br><br>
-                <span class='small-text'>Source: {item.get('source','')} | Similarity: {item.get('similarity',0):.2f}</span>
+                {item['answer']}
+                {meta}
                 </div>
                 """, unsafe_allow_html=True)
 
         st.markdown("</div>", unsafe_allow_html=True)
 
 # =====================================================
-# LOGIN SYSTEM
-# =====================================================
-
-ADMIN_USERNAME = "admin"
-ADMIN_PASSWORD = "admin123"
-
-
-def login_screen():
-
-    st.markdown("""
-    <style>
-    .login-box {
-        background: white;
-        padding: 40px;
-        border-radius: 22px;
-        box-shadow: 0 14px 35px rgba(15,23,42,0.08);
-        margin-top: 80px;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-
-    col1, col2, col3 = st.columns([1,2,1])
-
-    with col2:
-
-        st.markdown("<div class='login-box'>", unsafe_allow_html=True)
-
-        st.markdown("## 🔐 Koenig Stride Login")
-        st.markdown("### Tax & Entity Nexus Assistant")
-
-        login_type = st.selectbox(
-            "Login As",
-            ["Employee", "Admin"]
-        )
-
-    # =====================================================
-    # EMPLOYEE LOGIN
-    # =====================================================
-
-    if login_type == "Employee":
-
-        emp_id = st.text_input(
-            "Enter Employee ID",
-            placeholder="Example: 1001"
-        )
-
-        employee_name = f"Employee {emp_id}" if emp_id.strip().isdigit() else ""
-
-        if st.button("Employee Login", use_container_width=True):
-
-            if emp_id.strip().isdigit():
-
-                st.session_state.logged_in = True
-                st.session_state.role = "Employee"
-                st.session_state.employee_id = emp_id
-                st.session_state.employee_name = employee_name
-
-                st.rerun()
-
-            else:
-                st.error("Please enter a valid numeric Employee ID")
-
-        # =====================================================
-        # ADMIN LOGIN
-        # =====================================================
-
-        else:
-
-            username = st.text_input("Admin Username")
-            password = st.text_input(
-                "Password",
-                type="password"
-            )
-
-            if st.button("Admin Login", use_container_width=True):
-
-                if (
-                    username == ADMIN_USERNAME
-                    and password == ADMIN_PASSWORD
-                ):
-        st.markdown("</div>", unsafe_allow_html=True)
-
-# =====================================================
 # ADMIN PREVIEW
 # =====================================================
 
-with st.expander("Admin Preview: Knowledge Base"):
-    if not faq_df.empty:
-        st.success(f"Knowledge base loaded successfully. Total records: {len(faq_df)}")
-        cols = [c for c in ["Main Module", "Source", "Category", "Question", "Protected", "SPOC Name", "SPOC Email"] if c in faq_df.columns]
-        st.dataframe(faq_df[cols], use_container_width=True)
-    else:
-        st.warning("No knowledge records loaded.")
+if st.session_state.role == "Admin":
+    with st.expander("Admin Preview: Knowledge Base"):
+        if not faq_df.empty:
+            st.success(f"Knowledge base loaded successfully. Total records: {len(faq_df)}")
+            cols = [c for c in ["Main Module", "Source", "Category", "Question", "Protected", "SPOC Name", "SPOC Email"] if c in faq_df.columns]
+            st.dataframe(faq_df[cols], use_container_width=True)
+        else:
+            st.warning("No knowledge records loaded.")
+
+    with st.expander("Admin Preview: Semantic Match Test"):
+        test_query = st.text_input("Test semantic matching", placeholder="Example: UAE finance SPOC")
+        if st.button("Run Match Test") and test_query.strip():
+            test_results = semantic_search(test_query.strip())
+            if not test_results.empty:
+                cols = [c for c in ["Question", "Source", "Protected", "SPOC Name", "SPOC Email", "similarity"] if c in test_results.columns]
+                st.dataframe(test_results[cols], use_container_width=True)
 
 st.caption("Koenig Stride · Internal Tax & Entity Nexus Assistant")
