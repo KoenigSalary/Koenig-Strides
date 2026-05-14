@@ -775,9 +775,7 @@ with right:
     """, unsafe_allow_html=True)
 
     st.markdown("<div class='layout-card'>", unsafe_allow_html=True)
-    st.markdown("<div class='ask-title'>🚀 Start Here</div>", unsafe_allow_html=True)
-    st.markdown("<div class='info-box'>Click Start Here to open guided help categories.</div>", unsafe_allow_html=True)
-
+    
     if st.button("🚀 Start Here", use_container_width=True):
         st.session_state.menu_open = True
 
