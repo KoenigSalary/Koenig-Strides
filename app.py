@@ -103,9 +103,8 @@ html, body, [class*="css"] {
 
 /* ---------- LOGIN PAGE ---------- */
 
-.login-wrapper {
-    padding-top: 10px;
-}
+/* Mark the login page body so we can scope styles. */
+body.is-login-page [data-testid="stHeader"] { display:none; }
 
 .logo-img {
     width:220px;
@@ -113,23 +112,23 @@ html, body, [class*="css"] {
     height:auto;
 }
 
-.login-card {
+/* The dark login card is the FIRST column on the login page.
+   We target the column container directly so Streamlit widgets render
+   INSIDE the styled card (instead of escaping a raw <div>). */
+body.is-login-page [data-testid="column"]:first-child {
     background:
         radial-gradient(circle at 18% 6%, rgba(255,255,255,.10), transparent 38%),
         radial-gradient(circle at 88% 92%, rgba(255,255,255,.08), transparent 40%),
         linear-gradient(160deg,#04123d 0%,#06339a 55%,#0a52d6 100%);
     color:white;
-    padding:42px 38px;
+    padding:42px 38px !important;
     border-radius:24px;
     box-shadow:0 22px 55px rgba(15,23,42,.22);
-    min-height:680px;
-    display:flex;
-    flex-direction:column;
     position:relative;
     overflow:hidden;
 }
 
-.login-card::before {
+body.is-login-page [data-testid="column"]:first-child::before {
     content:"";
     position:absolute;
     top:-60px; right:-60px;
@@ -137,23 +136,34 @@ html, body, [class*="css"] {
     background:radial-gradient(circle, rgba(255,255,255,.10), transparent 70%);
     border-radius:50%;
     pointer-events:none;
+    z-index:0;
 }
 
-.login-card h1 {
+body.is-login-page [data-testid="column"]:first-child > div {
+    position:relative;
+    z-index:1;
+}
+
+body.is-login-page [data-testid="column"]:first-child h1,
+body.is-login-page [data-testid="column"]:first-child h2,
+body.is-login-page [data-testid="column"]:first-child h3,
+body.is-login-page [data-testid="column"]:first-child label,
+body.is-login-page [data-testid="column"]:first-child p,
+body.is-login-page [data-testid="column"]:first-child span,
+body.is-login-page [data-testid="column"]:first-child div {
     color:white;
-    font-size:30px;
-    margin:0;
-    letter-spacing:-0.3px;
 }
 
-.login-card label,
-.login-card p,
-.login-card span {
+/* Force text input labels white inside the dark login card */
+body.is-login-page [data-testid="column"]:first-child div[data-testid="stTextInput"] label p,
+body.is-login-page [data-testid="column"]:first-child div[data-testid="stRadio"] label p {
     color:white !important;
+    font-weight:700 !important;
+    font-size:14px !important;
+    letter-spacing:.2px;
 }
 
-/* Make form inputs inside the dark login card look clean */
-.login-card div[data-testid="stTextInput"] input,
+/* Inputs stay light so text remains readable */
 div[data-testid="stTextInput"] input {
     border-radius:12px;
     min-height:48px;
@@ -171,25 +181,25 @@ div[data-testid="stTextInput"] input:focus {
     outline:none !important;
 }
 
-div[data-testid="stTextInput"] label p {
-    font-weight:700 !important;
-    font-size:14px !important;
-    letter-spacing:.2px;
-}
-
-/* Radio (Login As) inside dark card */
-div[data-testid="stRadio"] label p {
-    color:white !important;
-    font-weight:700 !important;
-}
-
-div[data-testid="stRadio"] > div {
+/* Radio button look inside the dark card */
+body.is-login-page [data-testid="column"]:first-child div[data-testid="stRadio"] > div {
     gap: 18px !important;
 }
 
+body.is-login-page [data-testid="column"]:first-child div[role="radiogroup"] label {
+    background:rgba(255,255,255,.08);
+    border:1px solid rgba(255,255,255,.22);
+    border-radius:10px;
+    padding:8px 14px;
+}
+
+body.is-login-page [data-testid="column"]:first-child div[role="radiogroup"] label:hover {
+    background:rgba(255,255,255,.16);
+}
+
 .login-divider {
-    border-top:1px solid rgba(255,255,255,.20);
-    border-bottom:1px solid rgba(255,255,255,.20);
+    border-top:1px solid rgba(255,255,255,.22);
+    border-bottom:1px solid rgba(255,255,255,.22);
     padding:24px 0;
     margin:8px 0 28px 0;
 }
@@ -215,21 +225,31 @@ div[data-testid="stRadio"] > div {
     box-shadow:0 6px 18px rgba(21,91,232,.45);
 }
 
+.login-card-title {
+    color:white;
+    font-size:30px;
+    margin:0;
+    letter-spacing:-0.3px;
+    font-weight:900;
+}
+
 .login-tagline {
     margin:14px 0 0 60px;
     font-weight:600;
     font-size:14px;
     opacity:.92;
     letter-spacing:.2px;
+    color:white;
 }
 
 .login-help {
-    border-top:1px solid rgba(255,255,255,.20);
+    border-top:1px solid rgba(255,255,255,.22);
     padding-top:24px;
-    margin-top:auto;
+    margin-top:28px;
     text-align:center;
     font-size:14px;
     line-height:1.6;
+    color:white;
 }
 
 /* ---------- BRAND (right side / header) ---------- */
@@ -394,8 +414,8 @@ div[data-testid="stFormSubmitButton"] button {
     box-shadow:0 8px 20px rgba(21,91,232,.30) !important;
 }
 
-/* Make the Employee/Admin Login buttons stand out (they live inside the dark card) */
-.login-card .stButton > button {
+/* Employee/Admin Login button (lives inside the dark card column) */
+body.is-login-page [data-testid="column"]:first-child .stButton > button {
     background:linear-gradient(90deg,#1f6bff,#0b55d9) !important;
     color:white !important;
     border:none !important;
@@ -404,9 +424,10 @@ div[data-testid="stFormSubmitButton"] button {
     font-weight:800 !important;
     box-shadow:0 10px 24px rgba(21,91,232,.40) !important;
     letter-spacing:.2px;
+    margin-top:8px;
 }
 
-.login-card .stButton > button:hover {
+body.is-login-page [data-testid="column"]:first-child .stButton > button:hover {
     background:linear-gradient(90deg,#2b78ff,#1156e0) !important;
     transform:translateY(-1px);
 }
@@ -487,16 +508,23 @@ div[data-testid="stFormSubmitButton"] button {
     .brand-subtitle { font-size:14px; }
 }
 
+/* Tablet — narrow the login card padding */
+@media only screen and (max-width: 1100px) {
+    body.is-login-page [data-testid="column"]:first-child {
+        padding:34px 28px !important;
+    }
+}
+
 /* Mobile */
 @media only screen and (max-width: 760px) {
     .block-container { padding-left:0.6rem; padding-right:0.6rem; padding-top:0.5rem; }
 
-    .login-card {
-        min-height:auto;
-        padding:28px 22px;
+    body.is-login-page [data-testid="column"]:first-child {
+        padding:28px 22px !important;
         border-radius:20px;
+        margin-bottom:18px;
     }
-    .login-card h1 { font-size:24px; }
+    .login-card-title { font-size:24px; }
     .login-tagline { margin-left:58px; font-size:13px; }
     .login-divider { padding:18px 0; margin:6px 0 20px 0; }
     .login-help { padding-top:18px; font-size:13px; }
@@ -523,7 +551,6 @@ div[data-testid="stFormSubmitButton"] button {
         text-align:center;
     }
 
-    .login-card .stButton > button,
     .stButton > button {
         font-size:15px !important;
         min-height:48px !important;
@@ -532,8 +559,10 @@ div[data-testid="stFormSubmitButton"] button {
 
 /* Very small screens */
 @media only screen and (max-width: 420px) {
-    .login-card { padding:22px 16px; }
-    .login-card h1 { font-size:21px; }
+    body.is-login-page [data-testid="column"]:first-child {
+        padding:22px 16px !important;
+    }
+    .login-card-title { font-size:21px; }
     .login-bot-icon { height:40px; width:40px; min-width:40px; font-size:19px; }
     .login-tagline { margin-left:54px; }
     .brand-title { font-size:22px; }
@@ -668,15 +697,95 @@ for k, v in defaults.items():
 # =====================================================
 
 def login_screen():
-    st.markdown("<div class='login-wrapper'></div>", unsafe_allow_html=True)
+    # Tag the body so login-only CSS activates
+    st.markdown(
+        "<script>document.body.classList.add('is-login-page');</script>",
+        unsafe_allow_html=True
+    )
+    # Streamlit injects script via iframe, so also use a CSS-only fallback:
+    st.markdown("""
+    <style>
+    /* Fallback: if body class isn't applied (iframe sandbox), still style the
+       first column as a card whenever the .login-marker exists on the page. */
+    .login-marker ~ div [data-testid="column"]:first-child,
+    div:has(> .login-marker) [data-testid="column"]:first-child {
+        /* no-op placeholder, real styles below using body class */
+    }
+    </style>
+    <div class='login-marker' style='display:none;'></div>
+    """, unsafe_allow_html=True)
+
+    # Inject body class reliably via Streamlit's main script context
+    st.markdown(
+        """
+        <style>
+        /* Force-apply login card styling on the FIRST column whenever the
+           hidden marker is present in the DOM. Uses :has() selector. */
+        :root:has(.login-marker) [data-testid="column"]:first-child {
+            background:
+                radial-gradient(circle at 18% 6%, rgba(255,255,255,.10), transparent 38%),
+                radial-gradient(circle at 88% 92%, rgba(255,255,255,.08), transparent 40%),
+                linear-gradient(160deg,#04123d 0%,#06339a 55%,#0a52d6 100%);
+            color:white;
+            padding:42px 38px !important;
+            border-radius:24px;
+            box-shadow:0 22px 55px rgba(15,23,42,.22);
+            position:relative;
+            overflow:hidden;
+        }
+        :root:has(.login-marker) [data-testid="column"]:first-child h1,
+        :root:has(.login-marker) [data-testid="column"]:first-child h2,
+        :root:has(.login-marker) [data-testid="column"]:first-child h3,
+        :root:has(.login-marker) [data-testid="column"]:first-child label p,
+        :root:has(.login-marker) [data-testid="column"]:first-child p,
+        :root:has(.login-marker) [data-testid="column"]:first-child span,
+        :root:has(.login-marker) [data-testid="column"]:first-child div[data-testid="stMarkdownContainer"] {
+            color:white !important;
+        }
+        :root:has(.login-marker) [data-testid="column"]:first-child div[role="radiogroup"] label {
+            background:rgba(255,255,255,.08);
+            border:1px solid rgba(255,255,255,.22);
+            border-radius:10px;
+            padding:8px 14px;
+            color:white !important;
+        }
+        :root:has(.login-marker) [data-testid="column"]:first-child .stButton > button {
+            background:linear-gradient(90deg,#1f6bff,#0b55d9) !important;
+            color:white !important;
+            border:none !important;
+            min-height:54px !important;
+            font-size:16px !important;
+            font-weight:800 !important;
+            box-shadow:0 10px 24px rgba(21,91,232,.40) !important;
+            letter-spacing:.2px;
+            margin-top:8px;
+        }
+        :root:has(.login-marker) [data-testid="column"]:first-child .stButton > button:hover {
+            background:linear-gradient(90deg,#2b78ff,#1156e0) !important;
+        }
+        @media only screen and (max-width: 760px) {
+            :root:has(.login-marker) [data-testid="column"]:first-child {
+                padding:28px 22px !important;
+                border-radius:20px;
+                margin-bottom:18px;
+            }
+        }
+        @media only screen and (max-width: 420px) {
+            :root:has(.login-marker) [data-testid="column"]:first-child {
+                padding:22px 16px !important;
+            }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
     left, right = st.columns([1, 1.7], gap="large")
 
     with left:
-        st.markdown("<div class='login-card'>", unsafe_allow_html=True)
-
         if LOGO_B64:
             st.markdown(
-                img_html(LOGO_B64, style="width:230px; max-width:100%; filter:brightness(1.4); margin-bottom:30px;"),
+                img_html(LOGO_B64, style="width:220px; max-width:100%; filter:brightness(1.4) invert(1); margin-bottom:24px;"),
                 unsafe_allow_html=True
             )
         else:
@@ -686,9 +795,9 @@ def login_screen():
         <div class='login-divider'>
             <div class='login-brand-row'>
                 <div class='login-bot-icon'>☻</div>
-                <h1>Koenig Stride</h1>
+                <div class='login-card-title'>Koenig Stride</div>
             </div>
-            <p class='login-tagline'>Tax &amp; Entity Nexus Assistant</p>
+            <div class='login-tagline'>Tax &amp; Entity Nexus Assistant</div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -736,11 +845,10 @@ def login_screen():
             <span>Contact your administrator for assistance.</span>
         </div>
         """, unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
 
     with right:
         st.markdown("""
-        <div style='padding:36px 12px 18px 12px;'>
+        <div style='padding:24px 8px 12px 8px;'>
             <div class='brand-row'>
                 <div class='bot-icon'>☻</div>
                 <h1 class='brand-title'>Koenig Stride</h1>
