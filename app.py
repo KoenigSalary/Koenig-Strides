@@ -697,116 +697,201 @@ for k, v in defaults.items():
 # =====================================================
 
 def login_screen():
-    # Tag the body so login-only CSS activates
-    st.markdown(
-        "<script>document.body.classList.add('is-login-page');</script>",
-        unsafe_allow_html=True
-    )
-    # Streamlit injects script via iframe, so also use a CSS-only fallback:
+    # Login-page-specific styling (centered single card, original brand colors)
     st.markdown("""
     <style>
-    /* Fallback: if body class isn't applied (iframe sandbox), still style the
-       first column as a card whenever the .login-marker exists on the page. */
-    .login-marker ~ div [data-testid="column"]:first-child,
-    div:has(> .login-marker) [data-testid="column"]:first-child {
-        /* no-op placeholder, real styles below using body class */
+    .login-page-bg {
+        margin-top: -10px;
+    }
+    .login-stack {
+        max-width: 520px;
+        margin: 10px auto 0 auto;
+        text-align: center;
+    }
+    .login-logo-wrap {
+        text-align: center;
+        margin-bottom: 18px;
+    }
+    .login-logo-wrap img {
+        width: 240px;
+        max-width: 70%;
+        height: auto;
+        display: inline-block;
+    }
+    .login-title-row {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 14px;
+        margin-bottom: 6px;
+    }
+    .login-title-icon {
+        background: linear-gradient(135deg,#155be8,#0b3ba7);
+        color: white;
+        height: 48px;
+        width: 48px;
+        min-width: 48px;
+        border-radius: 50%;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 900;
+        font-size: 22px;
+        box-shadow: 0 6px 16px rgba(21,91,232,.32);
+    }
+    .login-title-text {
+        font-size: 34px;
+        font-weight: 900;
+        color: #04123d;
+        letter-spacing: -0.4px;
+        margin: 0;
+        line-height: 1.1;
+    }
+    .login-subtitle {
+        color: #334155;
+        font-size: 14px;
+        font-weight: 600;
+        margin: 0 0 22px 0;
+    }
+    .login-hero-card {
+        background:
+            radial-gradient(circle at 86% 42%, rgba(255,255,255,.18), transparent 32%),
+            linear-gradient(135deg,#04123d 0%,#0a3aae 55%,#155be8 100%);
+        color: white;
+        padding: 28px 30px;
+        border-radius: 20px;
+        box-shadow: 0 14px 36px rgba(15,23,42,.18);
+        margin: 0 auto 24px auto;
+        max-width: 520px;
+        text-align: center;
+    }
+    .login-hero-card h2 {
+        color: white;
+        font-size: 24px;
+        margin: 0 0 8px 0;
+        font-weight: 900;
+        letter-spacing: -0.3px;
+    }
+    .login-hero-card p {
+        color: white;
+        font-size: 15px;
+        margin: 0;
+        opacity: 0.95;
+        line-height: 1.5;
+    }
+    .sarika-wrap {
+        text-align: center;
+        margin: 10px auto 18px auto;
+    }
+    .sarika-wrap img {
+        width: 130px;
+        height: 130px;
+        border-radius: 50%;
+        object-fit: cover;
+        border: 4px solid #1471d8;
+        box-shadow: 0 8px 22px rgba(15,23,42,.18);
+    }
+    .sarika-caption {
+        margin-top: 10px;
+        font-weight: 800;
+        color: #0b3ba7;
+        font-size: 15px;
+    }
+    .sarika-online {
+        color: #15803d;
+        font-weight: 700;
+        font-size: 13px;
+        margin-top: 2px;
+    }
+    .login-form-card {
+        background: white;
+        border: 1px solid var(--border);
+        border-radius: 20px;
+        box-shadow: 0 16px 40px rgba(15,23,42,.10);
+        padding: 28px 30px;
+        max-width: 520px;
+        margin: 0 auto 18px auto;
+    }
+    .login-form-heading {
+        font-size: 18px;
+        font-weight: 800;
+        color: #04123d;
+        margin: 0 0 14px 0;
+        text-align: left;
+    }
+    .login-help-foot {
+        text-align: center;
+        color: #64748b;
+        font-size: 13px;
+        margin-top: 6px;
+        line-height: 1.6;
+    }
+    .login-help-foot b { color: #0b3ba7; }
+
+    @media only screen and (max-width: 600px) {
+        .login-title-text { font-size: 26px; }
+        .login-hero-card { padding: 22px 20px; }
+        .login-hero-card h2 { font-size: 20px; }
+        .login-form-card { padding: 22px 18px; }
+        .login-logo-wrap img { width: 200px; }
+        .sarika-wrap img { width: 110px; height: 110px; }
     }
     </style>
-    <div class='login-marker' style='display:none;'></div>
+    <div class='login-page-bg'></div>
     """, unsafe_allow_html=True)
 
-    # Inject body class reliably via Streamlit's main script context
-    st.markdown(
-        """
-        <style>
-        /* Force-apply login card styling on the FIRST column whenever the
-           hidden marker is present in the DOM. Uses :has() selector. */
-        :root:has(.login-marker) [data-testid="column"]:first-child {
-            background:
-                radial-gradient(circle at 18% 6%, rgba(255,255,255,.10), transparent 38%),
-                radial-gradient(circle at 88% 92%, rgba(255,255,255,.08), transparent 40%),
-                linear-gradient(160deg,#04123d 0%,#06339a 55%,#0a52d6 100%);
-            color:white;
-            padding:42px 38px !important;
-            border-radius:24px;
-            box-shadow:0 22px 55px rgba(15,23,42,.22);
-            position:relative;
-            overflow:hidden;
-        }
-        :root:has(.login-marker) [data-testid="column"]:first-child h1,
-        :root:has(.login-marker) [data-testid="column"]:first-child h2,
-        :root:has(.login-marker) [data-testid="column"]:first-child h3,
-        :root:has(.login-marker) [data-testid="column"]:first-child label p,
-        :root:has(.login-marker) [data-testid="column"]:first-child p,
-        :root:has(.login-marker) [data-testid="column"]:first-child span,
-        :root:has(.login-marker) [data-testid="column"]:first-child div[data-testid="stMarkdownContainer"] {
-            color:white !important;
-        }
-        :root:has(.login-marker) [data-testid="column"]:first-child div[role="radiogroup"] label {
-            background:rgba(255,255,255,.08);
-            border:1px solid rgba(255,255,255,.22);
-            border-radius:10px;
-            padding:8px 14px;
-            color:white !important;
-        }
-        :root:has(.login-marker) [data-testid="column"]:first-child .stButton > button {
-            background:linear-gradient(90deg,#1f6bff,#0b55d9) !important;
-            color:white !important;
-            border:none !important;
-            min-height:54px !important;
-            font-size:16px !important;
-            font-weight:800 !important;
-            box-shadow:0 10px 24px rgba(21,91,232,.40) !important;
-            letter-spacing:.2px;
-            margin-top:8px;
-        }
-        :root:has(.login-marker) [data-testid="column"]:first-child .stButton > button:hover {
-            background:linear-gradient(90deg,#2b78ff,#1156e0) !important;
-        }
-        @media only screen and (max-width: 760px) {
-            :root:has(.login-marker) [data-testid="column"]:first-child {
-                padding:28px 22px !important;
-                border-radius:20px;
-                margin-bottom:18px;
-            }
-        }
-        @media only screen and (max-width: 420px) {
-            :root:has(.login-marker) [data-testid="column"]:first-child {
-                padding:22px 16px !important;
-            }
-        }
-        </style>
-        """,
-        unsafe_allow_html=True
-    )
+    # Centered column wrapper
+    spacer_l, center, spacer_r = st.columns([1, 3, 1])
 
-    left, right = st.columns([1, 1.7], gap="large")
-
-    with left:
+    with center:
+        # 1. Logo (original color, untouched)
         if LOGO_B64:
             st.markdown(
-                img_html(LOGO_B64, style="width:220px; max-width:100%; filter:brightness(1.4) invert(1); margin-bottom:24px;"),
+                f"<div class='login-logo-wrap'><img src='data:image/png;base64,{LOGO_B64}'></div>",
                 unsafe_allow_html=True
             )
         else:
-            st.markdown("## KOENIG")
+            st.markdown("<div class='login-logo-wrap'><h2 style='color:#04123d;'>KOENIG</h2></div>", unsafe_allow_html=True)
 
+        # 2. Koenig Stride title (under logo, brand-colored)
         st.markdown("""
-        <div class='login-divider'>
-            <div class='login-brand-row'>
-                <div class='login-bot-icon'>☻</div>
-                <div class='login-card-title'>Koenig Stride</div>
+        <div class='login-stack'>
+            <div class='login-title-row'>
+                <div class='login-title-icon'>☻</div>
+                <h1 class='login-title-text'>Koenig Stride</h1>
             </div>
-            <div class='login-tagline'>Tax &amp; Entity Nexus Assistant</div>
+            <div class='login-subtitle'>Tax &amp; Entity Nexus Assistant — Step Forward</div>
         </div>
         """, unsafe_allow_html=True)
 
-        login_type = st.radio("Login As", ["Employee", "Admin"], horizontal=True)
+        # 3. Welcome hero (under title)
+        st.markdown("""
+        <div class='login-hero-card'>
+            <h2>Welcome to Koenig Stride</h2>
+            <p>Your secure internal assistant for tax, salary, entity and SPOC guidance.</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # 4. Sarika photo
+        if SARIKA_B64:
+            st.markdown(f"""
+            <div class='sarika-wrap'>
+                <img src='data:image/png;base64,{SARIKA_B64}'>
+                <div class='sarika-caption'>👩‍💼 Sarika</div>
+                <div class='sarika-online'>● Sarika is online</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # 5. Login form
+        st.markdown("<div class='login-form-card'>", unsafe_allow_html=True)
+        st.markdown("<div class='login-form-heading'>🔐 Sign in to continue</div>", unsafe_allow_html=True)
+
+        login_type = st.radio("Login As", ["Employee", "Admin"], horizontal=True, label_visibility="visible")
 
         if login_type == "Employee":
             user_id = st.text_input("Employee ID", placeholder="Example: 1001")
             password = st.text_input("Password", type="password", placeholder="Default: Welcome@123")
-            if st.button("Employee Login", use_container_width=True):
+            if st.button("Employee Login", use_container_width=True, type="primary"):
                 if not user_id.strip().isdigit():
                     st.error("Please enter a valid numeric Employee ID.")
                 elif not password:
@@ -825,7 +910,7 @@ def login_screen():
         else:
             user_id = st.text_input("Admin Username", value="admin")
             password = st.text_input("Password", type="password")
-            if st.button("Admin Login", use_container_width=True):
+            if st.button("Admin Login", use_container_width=True, type="primary"):
                 ok, msg, row = authenticate_user(user_id, password)
                 if ok and row.get("role") == "Admin":
                     st.session_state.logged_in = True
@@ -839,27 +924,13 @@ def login_screen():
                 else:
                     st.error(msg)
 
-        st.markdown("""
-        <div class='login-help'>
-            <b>❔ Need help?</b><br>
-            <span>Contact your administrator for assistance.</span>
-        </div>
-        """, unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
 
-    with right:
+        # 6. Help footer
         st.markdown("""
-        <div style='padding:24px 8px 12px 8px;'>
-            <div class='brand-row'>
-                <div class='bot-icon'>☻</div>
-                <h1 class='brand-title'>Koenig Stride</h1>
-            </div>
-            <div class='brand-subtitle'>Tax &amp; Entity Nexus Assistant — Step Forward</div>
-        </div>
-        """, unsafe_allow_html=True)
-        st.markdown("""
-        <div class='hero login-hero'>
-            <h2>Welcome to Koenig Stride</h2>
-            <p>Your secure internal assistant for tax, salary, entity and SPOC guidance.</p>
+        <div class='login-help-foot'>
+            <b>❔ Need help?</b><br>
+            Contact your administrator for assistance.
         </div>
         """, unsafe_allow_html=True)
 
