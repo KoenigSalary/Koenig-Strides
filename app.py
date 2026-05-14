@@ -397,8 +397,8 @@ def init_users_file():
                 "user_id": "admin",
                 "password_hash": hash_password(DEFAULT_ADMIN_PASSWORD),
                 "role": "Admin",
-                "first_login": False,
-                "active": True,
+                "first_login": "False",
+                "active": "True",
                 "display_name": "Admin"
             }
         ])
@@ -413,6 +413,9 @@ def load_users():
     return df
 
 def save_users(df):
+    for col in ["user_id", "password_hash", "role", "first_login", "active", "display_name"]:
+        if col in df.columns:
+            df[col] = df[col].astype(str)
     df.to_csv(USERS_PATH, index=False)
 
 def bool_from_str(value):
@@ -427,8 +430,8 @@ def ensure_employee_exists(emp_id):
             "user_id": emp_id,
             "password_hash": hash_password(DEFAULT_EMPLOYEE_PASSWORD),
             "role": "Employee",
-            "first_login": True,
-            "active": True,
+            "first_login": "True",
+            "active": "True",
             "display_name": f"Employee {emp_id}"
         }])
         df = pd.concat([df, new_row], ignore_index=True)
@@ -466,7 +469,7 @@ def update_user_password(user_id, new_password, first_login=False):
         return False
 
     df.loc[idx, "password_hash"] = hash_password(new_password)
-    df.loc[idx, "first_login"] = bool(first_login)
+    df.loc[idx, "first_login"] = "True" if first_login else "False"
     save_users(df)
     return True
 
