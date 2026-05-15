@@ -4,6 +4,7 @@ from pathlib import Path
 import base64
 import hashlib
 import numpy as np
+from datetime import datetime
 
 try:
     from sentence_transformers import SentenceTransformer
@@ -30,8 +31,7 @@ EXCEL_PATH = BASE_DIR / "knowledge" / "Koenig_VoiceBot_FAQ_Master.xlsx"
 LOGO_PATH = BASE_DIR / "assets" / "koenig_logo.png"
 SARIKA_PATH = BASE_DIR / "assets" / "sarika.png"
 USERS_PATH = BASE_DIR / "users.csv"
-QUERY_LOG_PATH = BASE_DIR / "query_log.csv"
-FAVORITES_PATH = BASE_DIR / "employee_favorites.csv"
+ANALYTICS_PATH = BASE_DIR / "analytics_log.csv"
 
 DEFAULT_EMPLOYEE_PASSWORD = "Welcome@123"
 DEFAULT_ADMIN_PASSWORD = "admin123"
@@ -1212,21 +1212,7 @@ def render_answer(row):
         email_html = f"<br><b>Email:</b> {email}" if email else ""
         st.markdown(f"<div class='protected-box'><b>🔒 Protected Information</b><br>This information is protected and cannot be displayed here.<br><br>Please contact the designated SPOC:<br><b>SPOC:</b> {spoc}{email_html}</div>", unsafe_allow_html=True)
     else:
-        answer_text = get_answer_text(row)
-        st.markdown(f"<div class='answer-box'><b>Koenig Stride Answer:</b><br>{answer_text}</div>", unsafe_allow_html=True)
-
-        if st.session_state.role == "Employee":
-            question_text = safe_get(row, "Question")
-            category_text = safe_get(row, "Category")
-            module_text = safe_get(row, "Main Module")
-            fav_key = "fav_" + hashlib.md5((str(st.session_state.employee_id) + question_text).encode()).hexdigest()[:12]
-
-            if st.button("⭐ Save to My Shortcuts", key=fav_key):
-                ok, msg = add_favorite(module_text, category_text, question_text, answer_text)
-                if ok:
-                    st.success(msg)
-                else:
-                    st.info(msg)
+        st.markdown(f"<div class='answer-box'><b>Koenig Stride Answer:</b><br>{get_answer_text(row)}</div>", unsafe_allow_html=True)
 
 # =====================================================
 # SEARCH
@@ -1329,227 +1315,164 @@ Knowledge Base:
 
 
 # =====================================================
-# EMPLOYEE DASHBOARD DATA
+# ADMIN ANALYTICS LOGGING
 # =====================================================
 
-def init_query_log():
-    if not QUERY_LOG_PATH.exists():
-        df = pd.DataFrame(columns=[
-            "timestamp", "employee_id", "role", "query",
-            "answer_type", "source", "similarity"
-        ])
-        df.to_csv(QUERY_LOG_PATH, index=False)
-
-def load_query_log():
-    init_query_log()
+def get_row_category(row):
+    """Return category from the active knowledge base row."""
     try:
-        return pd.read_csv(QUERY_LOG_PATH, dtype=str).fillna("")
-    except Exception:
-        return pd.DataFrame(columns=[
-            "timestamp", "employee_id", "role", "query",
-            "answer_type", "source", "similarity"
-        ])
-
-def save_query_log(df):
-    df.to_csv(QUERY_LOG_PATH, index=False)
-
-def log_query(query, answer_type="", source="", similarity=0):
-    """Store employee/admin question history for the dashboard."""
-    try:
-        df = load_query_log()
-        new_row = pd.DataFrame([{
-            "timestamp": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "employee_id": str(st.session_state.employee_id),
-            "role": str(st.session_state.role),
-            "query": str(query),
-            "answer_type": str(answer_type),
-            "source": str(source),
-            "similarity": f"{float(similarity):.2f}" if str(similarity) != "" else ""
-        }])
-        df = pd.concat([df, new_row], ignore_index=True)
-        save_query_log(df.tail(5000))
+        cat_col = get_category_column(faq_df)
+        if cat_col:
+            return safe_get(row, cat_col)
     except Exception:
         pass
+    return safe_get(row, "Category")
 
-def init_favorites():
-    if not FAVORITES_PATH.exists():
-        df = pd.DataFrame(columns=[
-            "employee_id", "module", "category", "question", "answer", "saved_at"
-        ])
-        df.to_csv(FAVORITES_PATH, index=False)
 
-def load_favorites():
-    init_favorites()
+def log_analytics(query, result_type, answer_type, similarity=0, source="", module="", category="", matched_question=""):
+    """Append one usage row to analytics_log.csv. Keeps existing app logic unchanged."""
     try:
-        return pd.read_csv(FAVORITES_PATH, dtype=str).fillna("")
-    except Exception:
-        return pd.DataFrame(columns=[
-            "employee_id", "module", "category", "question", "answer", "saved_at"
-        ])
-
-def save_favorites(df):
-    df.to_csv(FAVORITES_PATH, index=False)
-
-def add_favorite(module, category, question, answer):
-    """Save a FAQ as an employee shortcut."""
-    try:
-        employee_id = str(st.session_state.employee_id)
-        df = load_favorites()
-
-        duplicate = df[
-            (df["employee_id"].astype(str) == employee_id) &
-            (df["question"].astype(str).str.strip().str.lower() == str(question).strip().lower())
-        ]
-
-        if not duplicate.empty:
-            return False, "This FAQ is already saved in your shortcuts."
-
         new_row = pd.DataFrame([{
-            "employee_id": employee_id,
-            "module": str(module),
-            "category": str(category),
-            "question": str(question),
-            "answer": str(answer),
-            "saved_at": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "employee_id": st.session_state.get("employee_id", ""),
+            "employee_name": st.session_state.get("employee_name", ""),
+            "role": st.session_state.get("role", ""),
+            "query": str(query),
+            "result_type": result_type,
+            "answer_type": answer_type,
+            "similarity": round(float(similarity), 4) if similarity is not None else 0,
+            "source": source,
+            "module": module,
+            "category": category,
+            "matched_question": matched_question,
         }])
 
-        df = pd.concat([df, new_row], ignore_index=True)
-        save_favorites(df)
-        return True, "Saved to My Shortcuts."
-    except Exception as e:
-        return False, f"Could not save shortcut: {e}"
+        if ANALYTICS_PATH.exists():
+            old = pd.read_csv(ANALYTICS_PATH, dtype=str).fillna("")
+            pd.concat([old, new_row], ignore_index=True).to_csv(ANALYTICS_PATH, index=False)
+        else:
+            new_row.to_csv(ANALYTICS_PATH, index=False)
+    except Exception:
+        # Do not break employee experience if logging fails
+        pass
 
-def get_employee_recent_questions(limit=5):
-    df = load_query_log()
-    if df.empty:
-        return df
 
-    employee_id = str(st.session_state.employee_id)
-    emp_df = df[df["employee_id"].astype(str) == employee_id].copy()
+def load_analytics():
+    if ANALYTICS_PATH.exists():
+        try:
+            df = pd.read_csv(ANALYTICS_PATH, dtype=str).fillna("")
+            if "timestamp" in df.columns:
+                df["timestamp_dt"] = pd.to_datetime(df["timestamp"], errors="coerce")
+            if "similarity" in df.columns:
+                df["similarity_num"] = pd.to_numeric(df["similarity"], errors="coerce").fillna(0)
+            return df
+        except Exception:
+            return pd.DataFrame()
+    return pd.DataFrame()
 
-    if emp_df.empty:
-        return emp_df
 
-    return emp_df.tail(limit).iloc[::-1]
+def render_admin_analytics_dashboard():
+    st.markdown("### 📊 Admin Analytics Dashboard")
+    analytics_df = load_analytics()
 
-def get_employee_favorites():
-    df = load_favorites()
-    if df.empty:
-        return df
-
-    employee_id = str(st.session_state.employee_id)
-    return df[df["employee_id"].astype(str) == employee_id].copy()
-
-def render_employee_dashboard():
-    """Employee Dashboard: recent questions, shortcuts, quick actions and tax summary placeholder."""
-    if st.session_state.role != "Employee":
+    if analytics_df.empty:
+        st.info("No usage data yet. Analytics will appear after employees start asking questions.")
         return
 
-    recent_df = get_employee_recent_questions(limit=5)
-    fav_df = get_employee_favorites()
+    total_queries = len(analytics_df)
+    unique_employees = analytics_df.get("employee_id", pd.Series(dtype=str)).nunique()
+    unanswered = int((analytics_df.get("result_type", pd.Series(dtype=str)) == "not_found").sum())
+    protected = int((analytics_df.get("result_type", pd.Series(dtype=str)) == "protected").sum())
 
-    st.markdown("<div class='card'>", unsafe_allow_html=True)
-    st.markdown("### 👤 My Dashboard")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Total Queries", total_queries)
+    m2.metric("Unique Employees", unique_employees)
+    m3.metric("Unanswered", unanswered)
+    m4.metric("Protected Requests", protected)
 
-    c1, c2, c3 = st.columns(3)
+    st.markdown("---")
 
+    c1, c2 = st.columns(2)
     with c1:
-        st.metric("Recent Questions", len(recent_df))
+        st.markdown("#### Top Modules")
+        if "module" in analytics_df.columns:
+            module_counts = analytics_df["module"].replace("", "Unknown").value_counts().reset_index()
+            module_counts.columns = ["Module", "Count"]
+            st.dataframe(module_counts, use_container_width=True, hide_index=True)
+            st.bar_chart(module_counts.set_index("Module"))
 
     with c2:
-        st.metric("Saved Shortcuts", len(fav_df))
+        st.markdown("#### Top Categories")
+        if "category" in analytics_df.columns:
+            category_counts = analytics_df["category"].replace("", "Unknown").value_counts().head(15).reset_index()
+            category_counts.columns = ["Category", "Count"]
+            st.dataframe(category_counts, use_container_width=True, hide_index=True)
+            st.bar_chart(category_counts.set_index("Category"))
 
+    c3, c4 = st.columns(2)
     with c3:
-        st.metric("Employee ID", st.session_state.employee_id)
+        st.markdown("#### Most Active Employees")
+        emp_counts = analytics_df.get("employee_id", pd.Series(dtype=str)).replace("", "Unknown").value_counts().head(15).reset_index()
+        emp_counts.columns = ["Employee ID", "Queries"]
+        st.dataframe(emp_counts, use_container_width=True, hide_index=True)
 
-    tab1, tab2, tab3, tab4 = st.tabs([
-        "🕘 Recently Asked",
-        "⭐ My Shortcuts",
-        "⚡ Quick Actions",
-        "📄 My Tax Summary"
-    ])
+    with c4:
+        st.markdown("#### Result Types")
+        result_counts = analytics_df.get("result_type", pd.Series(dtype=str)).replace("", "Unknown").value_counts().reset_index()
+        result_counts.columns = ["Result", "Count"]
+        st.dataframe(result_counts, use_container_width=True, hide_index=True)
+        st.bar_chart(result_counts.set_index("Result"))
 
-    with tab1:
-        if recent_df.empty:
-            st.info("No recent questions yet.")
-        else:
-            for _, r in recent_df.iterrows():
-                q = str(r.get("query", ""))
-                ts = str(r.get("timestamp", ""))
-                src = str(r.get("source", ""))
-                st.markdown(
-                    f"<div class='bot-bubble'><b>{q}</b><br>"
-                    f"<span class='small-text'>{ts} · {src}</span></div>",
-                    unsafe_allow_html=True
-                )
-                if st.button(f"Ask again", key=f"ask_again_{hashlib.md5((q+ts).encode()).hexdigest()[:10]}"):
-                    submit_query(q)
-                    st.rerun()
+    st.markdown("#### Unanswered Queries")
+    unanswered_df = analytics_df[analytics_df.get("result_type", "") == "not_found"].copy()
+    if unanswered_df.empty:
+        st.success("No unanswered queries recorded yet.")
+    else:
+        cols = [c for c in ["timestamp", "employee_id", "query", "similarity", "module", "category"] if c in unanswered_df.columns]
+        st.dataframe(unanswered_df[cols].tail(50).sort_values("timestamp", ascending=False), use_container_width=True, hide_index=True)
 
-    with tab2:
-        if fav_df.empty:
-            st.info("No shortcuts saved yet. Open any FAQ answer and click 'Save to My Shortcuts'.")
-        else:
-            for _, r in fav_df.tail(10).iloc[::-1].iterrows():
-                q = str(r.get("question", ""))
-                ans = str(r.get("answer", ""))
-                mod = str(r.get("module", ""))
-                cat = str(r.get("category", ""))
-                with st.expander(f"⭐ {q}", expanded=False):
-                    st.markdown(f"**Area:** {mod}  \n**Category:** {cat}")
-                    st.markdown(ans)
+    st.markdown("#### Recent Query Log")
+    recent_cols = [c for c in ["timestamp", "employee_id", "role", "query", "result_type", "module", "category", "matched_question", "similarity"] if c in analytics_df.columns]
+    recent = analytics_df[recent_cols].tail(100).sort_values("timestamp", ascending=False)
+    st.dataframe(recent, use_container_width=True, hide_index=True)
 
-    with tab3:
-        st.markdown("Use these common shortcuts to ask Koenig Stride directly.")
-        q1, q2, q3 = st.columns(3)
-        quick_questions = [
-            ("What is NPS?", "quick_nps"),
-            ("Which tax regime should I choose?", "quick_tax_regime"),
-            ("How is HRA exemption calculated?", "quick_hra")
-        ]
-        for col, (question, key) in zip([q1, q2, q3], quick_questions):
-            with col:
-                if st.button(question, key=key, use_container_width=True):
-                    submit_query(question)
-                    st.rerun()
-
-    with tab4:
-        st.info(
-            "My Tax Summary is a placeholder for the next integration. "
-            "Later this can connect with RMS/Payroll to show regime, TDS, Form 16, NPS and HRA status."
-        )
-        st.markdown(f"""
-        <div class='answer-box'>
-        <b>Employee:</b> {st.session_state.employee_name}<br>
-        <b>Employee ID:</b> {st.session_state.employee_id}<br>
-        <b>Current Data Source:</b> FAQ knowledge base only<br>
-        <b>Future Data Source:</b> RMS / Payroll / TDS module
-        </div>
-        """, unsafe_allow_html=True)
-
-    st.markdown("</div>", unsafe_allow_html=True)
-
+    csv = analytics_df.drop(columns=[c for c in ["timestamp_dt", "similarity_num"] if c in analytics_df.columns]).to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "⬇️ Download Analytics CSV",
+        data=csv,
+        file_name="koenig_stride_analytics.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
 
 def submit_query(query):
     results = semantic_search(query)
     if results.empty:
         st.session_state.chat_history.append({"query":query,"type":"not_found","answer":"Knowledge base is not loaded.","similarity":0,"source":""})
-        log_query(query, "not_found", "", 0)
+        log_analytics(query, "not_found", "no_knowledge", 0, "", "", "", "")
         return
+
     top = results.iloc[0]
     sim = float(top.get("similarity", 0))
+    source = safe_get(top, "Source")
+    module = safe_get(top, "Main Module")
+    category = get_row_category(top)
+    matched_question = safe_get(top, "Question")
+
     if sim < 0.15:
-        st.session_state.chat_history.append({"query":query,"type":"not_found","answer":"I could not find a relevant answer. Please try differently or contact the relevant SPOC.","similarity":sim,"source":safe_get(top,"Source")})
-        log_query(query, "not_found", safe_get(top, "Source"), sim)
+        st.session_state.chat_history.append({"query":query,"type":"not_found","answer":"I could not find a relevant answer. Please try differently or contact the relevant SPOC.","similarity":sim,"source":source})
+        log_analytics(query, "not_found", "low_similarity", sim, source, module, category, matched_question)
         return
+
     if is_protected(top):
         spoc, email = get_spoc(top)
-        st.session_state.chat_history.append({"query":query,"type":"protected","answer":"This information is protected and cannot be displayed here.","spoc":spoc,"email":email,"similarity":sim,"source":safe_get(top,"Source")})
-        log_query(query, "protected", safe_get(top, "Source"), sim)
+        st.session_state.chat_history.append({"query":query,"type":"protected","answer":"This information is protected and cannot be displayed here.","spoc":spoc,"email":email,"similarity":sim,"source":source})
+        log_analytics(query, "protected", "spoc_routing", sim, source, module, category, matched_question)
         return
+
     ans = generate_response(query, results)
-    st.session_state.chat_history.append({"query":query,"type":"answer","answer":ans,"similarity":sim,"source":safe_get(top,"Source")})
-    log_query(query, "answer", safe_get(top, "Source"), sim)
+    st.session_state.chat_history.append({"query":query,"type":"answer","answer":ans,"similarity":sim,"source":source})
+    log_analytics(query, "answer", "answered", sim, source, module, category, matched_question)
 
 # =====================================================
 # LOGOUT
@@ -1643,8 +1566,6 @@ with right:
         <p>Select Start Here to browse guided help,<br>or use the chat box to ask directly.</p>
     </div>
     """, unsafe_allow_html=True)
-
-    render_employee_dashboard()
 
     st.markdown("<div class='primary-start'>", unsafe_allow_html=True)
     if st.button("🚀 Start Here                                              →", use_container_width=True):
@@ -1773,6 +1694,9 @@ with right:
 # =====================================================
 
 if st.session_state.role == "Admin":
+    with st.expander("📊 Admin Analytics Dashboard", expanded=False):
+        render_admin_analytics_dashboard()
+
     with st.expander("Admin Panel: User Management"):
         st.markdown("### Reset Employee Password")
         reset_emp_id = st.text_input("Employee ID to reset", placeholder="Example: 1001")
