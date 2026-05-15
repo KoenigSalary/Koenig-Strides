@@ -3,8 +3,9 @@ import pandas as pd
 from pathlib import Path
 import base64
 import hashlib
-import numpy as np
+import shutil
 from datetime import datetime
+import numpy as np
 
 try:
     from sentence_transformers import SentenceTransformer
@@ -31,7 +32,10 @@ EXCEL_PATH = BASE_DIR / "knowledge" / "Koenig_VoiceBot_FAQ_Master.xlsx"
 LOGO_PATH = BASE_DIR / "assets" / "koenig_logo.png"
 SARIKA_PATH = BASE_DIR / "assets" / "sarika.png"
 USERS_PATH = BASE_DIR / "users.csv"
-ANALYTICS_PATH = BASE_DIR / "analytics_log.csv"
+
+UPLOAD_FOLDER = BASE_DIR / "knowledge"
+UPLOAD_FOLDER.mkdir(exist_ok=True)
+KNOWLEDGE_FILE = UPLOAD_FOLDER / "Koenig_VoiceBot_FAQ_Master.xlsx"
 
 DEFAULT_EMPLOYEE_PASSWORD = "Welcome@123"
 DEFAULT_ADMIN_PASSWORD = "admin123"
@@ -1313,166 +1317,300 @@ Knowledge Base:
     except Exception:
         return get_answer_text(top)
 
-
-# =====================================================
-# ADMIN ANALYTICS LOGGING
-# =====================================================
-
-def get_row_category(row):
-    """Return category from the active knowledge base row."""
-    try:
-        cat_col = get_category_column(faq_df)
-        if cat_col:
-            return safe_get(row, cat_col)
-    except Exception:
-        pass
-    return safe_get(row, "Category")
-
-
-def log_analytics(query, result_type, answer_type, similarity=0, source="", module="", category="", matched_question=""):
-    """Append one usage row to analytics_log.csv. Keeps existing app logic unchanged."""
-    try:
-        new_row = pd.DataFrame([{
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "employee_id": st.session_state.get("employee_id", ""),
-            "employee_name": st.session_state.get("employee_name", ""),
-            "role": st.session_state.get("role", ""),
-            "query": str(query),
-            "result_type": result_type,
-            "answer_type": answer_type,
-            "similarity": round(float(similarity), 4) if similarity is not None else 0,
-            "source": source,
-            "module": module,
-            "category": category,
-            "matched_question": matched_question,
-        }])
-
-        if ANALYTICS_PATH.exists():
-            old = pd.read_csv(ANALYTICS_PATH, dtype=str).fillna("")
-            pd.concat([old, new_row], ignore_index=True).to_csv(ANALYTICS_PATH, index=False)
-        else:
-            new_row.to_csv(ANALYTICS_PATH, index=False)
-    except Exception:
-        # Do not break employee experience if logging fails
-        pass
-
-
-def load_analytics():
-    if ANALYTICS_PATH.exists():
-        try:
-            df = pd.read_csv(ANALYTICS_PATH, dtype=str).fillna("")
-            if "timestamp" in df.columns:
-                df["timestamp_dt"] = pd.to_datetime(df["timestamp"], errors="coerce")
-            if "similarity" in df.columns:
-                df["similarity_num"] = pd.to_numeric(df["similarity"], errors="coerce").fillna(0)
-            return df
-        except Exception:
-            return pd.DataFrame()
-    return pd.DataFrame()
-
-
-def render_admin_analytics_dashboard():
-    st.markdown("### 📊 Admin Analytics Dashboard")
-    analytics_df = load_analytics()
-
-    if analytics_df.empty:
-        st.info("No usage data yet. Analytics will appear after employees start asking questions.")
-        return
-
-    total_queries = len(analytics_df)
-    unique_employees = analytics_df.get("employee_id", pd.Series(dtype=str)).nunique()
-    unanswered = int((analytics_df.get("result_type", pd.Series(dtype=str)) == "not_found").sum())
-    protected = int((analytics_df.get("result_type", pd.Series(dtype=str)) == "protected").sum())
-
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Total Queries", total_queries)
-    m2.metric("Unique Employees", unique_employees)
-    m3.metric("Unanswered", unanswered)
-    m4.metric("Protected Requests", protected)
-
-    st.markdown("---")
-
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("#### Top Modules")
-        if "module" in analytics_df.columns:
-            module_counts = analytics_df["module"].replace("", "Unknown").value_counts().reset_index()
-            module_counts.columns = ["Module", "Count"]
-            st.dataframe(module_counts, use_container_width=True, hide_index=True)
-            st.bar_chart(module_counts.set_index("Module"))
-
-    with c2:
-        st.markdown("#### Top Categories")
-        if "category" in analytics_df.columns:
-            category_counts = analytics_df["category"].replace("", "Unknown").value_counts().head(15).reset_index()
-            category_counts.columns = ["Category", "Count"]
-            st.dataframe(category_counts, use_container_width=True, hide_index=True)
-            st.bar_chart(category_counts.set_index("Category"))
-
-    c3, c4 = st.columns(2)
-    with c3:
-        st.markdown("#### Most Active Employees")
-        emp_counts = analytics_df.get("employee_id", pd.Series(dtype=str)).replace("", "Unknown").value_counts().head(15).reset_index()
-        emp_counts.columns = ["Employee ID", "Queries"]
-        st.dataframe(emp_counts, use_container_width=True, hide_index=True)
-
-    with c4:
-        st.markdown("#### Result Types")
-        result_counts = analytics_df.get("result_type", pd.Series(dtype=str)).replace("", "Unknown").value_counts().reset_index()
-        result_counts.columns = ["Result", "Count"]
-        st.dataframe(result_counts, use_container_width=True, hide_index=True)
-        st.bar_chart(result_counts.set_index("Result"))
-
-    st.markdown("#### Unanswered Queries")
-    unanswered_df = analytics_df[analytics_df.get("result_type", "") == "not_found"].copy()
-    if unanswered_df.empty:
-        st.success("No unanswered queries recorded yet.")
-    else:
-        cols = [c for c in ["timestamp", "employee_id", "query", "similarity", "module", "category"] if c in unanswered_df.columns]
-        st.dataframe(unanswered_df[cols].tail(50).sort_values("timestamp", ascending=False), use_container_width=True, hide_index=True)
-
-    st.markdown("#### Recent Query Log")
-    recent_cols = [c for c in ["timestamp", "employee_id", "role", "query", "result_type", "module", "category", "matched_question", "similarity"] if c in analytics_df.columns]
-    recent = analytics_df[recent_cols].tail(100).sort_values("timestamp", ascending=False)
-    st.dataframe(recent, use_container_width=True, hide_index=True)
-
-    csv = analytics_df.drop(columns=[c for c in ["timestamp_dt", "similarity_num"] if c in analytics_df.columns]).to_csv(index=False).encode("utf-8")
-    st.download_button(
-        "⬇️ Download Analytics CSV",
-        data=csv,
-        file_name="koenig_stride_analytics.csv",
-        mime="text/csv",
-        use_container_width=True,
-    )
-
 def submit_query(query):
     results = semantic_search(query)
     if results.empty:
         st.session_state.chat_history.append({"query":query,"type":"not_found","answer":"Knowledge base is not loaded.","similarity":0,"source":""})
-        log_analytics(query, "not_found", "no_knowledge", 0, "", "", "", "")
         return
-
     top = results.iloc[0]
     sim = float(top.get("similarity", 0))
-    source = safe_get(top, "Source")
-    module = safe_get(top, "Main Module")
-    category = get_row_category(top)
-    matched_question = safe_get(top, "Question")
-
     if sim < 0.15:
-        st.session_state.chat_history.append({"query":query,"type":"not_found","answer":"I could not find a relevant answer. Please try differently or contact the relevant SPOC.","similarity":sim,"source":source})
-        log_analytics(query, "not_found", "low_similarity", sim, source, module, category, matched_question)
+        st.session_state.chat_history.append({"query":query,"type":"not_found","answer":"I could not find a relevant answer. Please try differently or contact the relevant SPOC.","similarity":sim,"source":safe_get(top,"Source")})
         return
-
     if is_protected(top):
         spoc, email = get_spoc(top)
-        st.session_state.chat_history.append({"query":query,"type":"protected","answer":"This information is protected and cannot be displayed here.","spoc":spoc,"email":email,"similarity":sim,"source":source})
-        log_analytics(query, "protected", "spoc_routing", sim, source, module, category, matched_question)
+        st.session_state.chat_history.append({"query":query,"type":"protected","answer":"This information is protected and cannot be displayed here.","spoc":spoc,"email":email,"similarity":sim,"source":safe_get(top,"Source")})
         return
-
     ans = generate_response(query, results)
-    st.session_state.chat_history.append({"query":query,"type":"answer","answer":ans,"similarity":sim,"source":source})
-    log_analytics(query, "answer", "answered", sim, source, module, category, matched_question)
+    st.session_state.chat_history.append({"query":query,"type":"answer","answer":ans,"similarity":sim,"source":safe_get(top,"Source")})
+
+
+# =====================================================
+# KNOWLEDGE MANAGEMENT VALIDATION
+# =====================================================
+
+def validate_knowledge_file(file_path):
+    issues = []
+
+    try:
+        xl = pd.ExcelFile(file_path)
+
+        required_sheets = [
+            "Salary & Tax FAQs",
+            "Entity Nexus FAQs"
+        ]
+
+        for sheet in required_sheets:
+            if sheet not in xl.sheet_names:
+                issues.append({
+                    "Type": "Missing Sheet",
+                    "Sheet": sheet,
+                    "Row": "",
+                    "Details": f"{sheet} sheet missing"
+                })
+                continue
+
+            df = pd.read_excel(file_path, sheet_name=sheet).fillna("")
+            df.columns = [str(c).strip() for c in df.columns]
+
+            if "Question" not in df.columns:
+                issues.append({
+                    "Type": "Missing Column",
+                    "Sheet": sheet,
+                    "Row": "",
+                    "Details": "Question column missing"
+                })
+                continue
+
+            if "Protected" not in df.columns:
+                issues.append({
+                    "Type": "Missing Column",
+                    "Sheet": sheet,
+                    "Row": "",
+                    "Details": "Protected column missing"
+                })
+
+            if "SPOC Name" not in df.columns:
+                issues.append({
+                    "Type": "Missing Column",
+                    "Sheet": sheet,
+                    "Row": "",
+                    "Details": "SPOC Name column missing"
+                })
+
+            if "SPOC Email" not in df.columns:
+                issues.append({
+                    "Type": "Missing Column",
+                    "Sheet": sheet,
+                    "Row": "",
+                    "Details": "SPOC Email column missing"
+                })
+
+            duplicate_questions = (
+                df[df["Question"].astype(str).str.strip() != ""]
+                .duplicated(subset=["Question"], keep=False)
+            )
+
+            if duplicate_questions.any():
+                duplicates_df = df[duplicate_questions]
+                for idx, row in duplicates_df.iterrows():
+                    issues.append({
+                        "Type": "Duplicate Question",
+                        "Sheet": sheet,
+                        "Row": idx + 2,
+                        "Details": str(row.get("Question", "")).strip()
+                    })
+
+            for idx, row in df.iterrows():
+                question = str(row.get("Question", "")).strip()
+
+                answer = ""
+                for answer_col in ["Display Message (Voice)", "Voice Response", "Answer (Internal)", "Answer", "Response"]:
+                    if answer_col in df.columns:
+                        answer = str(row.get(answer_col, "")).strip()
+                        if answer:
+                            break
+
+                protected = str(row.get("Protected", "")).strip().lower()
+                spoc_name = str(row.get("SPOC Name", "")).strip()
+                spoc_email = str(row.get("SPOC Email", "")).strip()
+
+                if question == "":
+                    issues.append({
+                        "Type": "Missing Question",
+                        "Sheet": sheet,
+                        "Row": idx + 2,
+                        "Details": "Question is blank"
+                    })
+
+                if question and answer == "":
+                    issues.append({
+                        "Type": "Missing Answer",
+                        "Sheet": sheet,
+                        "Row": idx + 2,
+                        "Details": question
+                    })
+
+                if protected in ["yes", "true", "1", "y", "protected"]:
+                    if spoc_name == "":
+                        issues.append({
+                            "Type": "Protected Without SPOC Name",
+                            "Sheet": sheet,
+                            "Row": idx + 2,
+                            "Details": question or "Question blank"
+                        })
+
+                    if spoc_email == "":
+                        issues.append({
+                            "Type": "Protected Without SPOC Email",
+                            "Sheet": sheet,
+                            "Row": idx + 2,
+                            "Details": question or "Question blank"
+                        })
+
+        if "SPOC Master" in xl.sheet_names:
+            spoc_df_check = pd.read_excel(file_path, sheet_name="SPOC Master").fillna("")
+            spoc_df_check.columns = [str(c).strip() for c in spoc_df_check.columns]
+
+            possible_email_cols = [c for c in spoc_df_check.columns if "email" in c.lower()]
+            possible_name_cols = [c for c in spoc_df_check.columns if "name" in c.lower()]
+
+            if not possible_name_cols:
+                issues.append({
+                    "Type": "SPOC Master Issue",
+                    "Sheet": "SPOC Master",
+                    "Row": "",
+                    "Details": "No SPOC name column detected"
+                })
+
+            if not possible_email_cols:
+                issues.append({
+                    "Type": "SPOC Master Issue",
+                    "Sheet": "SPOC Master",
+                    "Row": "",
+                    "Details": "No SPOC email column detected"
+                })
+        else:
+            issues.append({
+                "Type": "Missing Sheet",
+                "Sheet": "SPOC Master",
+                "Row": "",
+                "Details": "SPOC Master sheet missing"
+            })
+
+        return pd.DataFrame(issues)
+
+    except Exception as e:
+        return pd.DataFrame([{
+            "Type": "File Error",
+            "Sheet": "",
+            "Row": "",
+            "Details": str(e)
+        }])
+
+
+def knowledge_file_summary(file_path):
+    try:
+        xl = pd.ExcelFile(file_path)
+        rows = []
+
+        for sheet in xl.sheet_names:
+            df = pd.read_excel(file_path, sheet_name=sheet).fillna("")
+            rows.append({
+                "Sheet": sheet,
+                "Rows": len(df),
+                "Columns": len(df.columns),
+                "Column Names": ", ".join([str(c) for c in df.columns])
+            })
+
+        return pd.DataFrame(rows), ""
+
+    except Exception as e:
+        return pd.DataFrame(), str(e)
+
+
+def render_knowledge_management_panel():
+    st.markdown("### 📚 Knowledge Management Panel")
+    st.caption("Upload and validate the Koenig Stride Excel knowledge file directly from the Admin panel.")
+
+    uploaded_file = st.file_uploader(
+        "Upload Updated Excel Knowledge File",
+        type=["xlsx"],
+        key="knowledge_file_uploader"
+    )
+
+    if uploaded_file is not None:
+        temp_path = UPLOAD_FOLDER / "temp_uploaded_knowledge.xlsx"
+
+        with open(temp_path, "wb") as f:
+            f.write(uploaded_file.getbuffer())
+
+        validation_df = validate_knowledge_file(temp_path)
+
+        if validation_df.empty:
+            backup_path = UPLOAD_FOLDER / f"backup_Koenig_VoiceBot_FAQ_Master_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+
+            if KNOWLEDGE_FILE.exists():
+                shutil.copy(KNOWLEDGE_FILE, backup_path)
+
+            shutil.copy(temp_path, KNOWLEDGE_FILE)
+
+            st.success("Knowledge file uploaded and activated successfully.")
+            st.info(f"Updated on: {datetime.now().strftime('%d-%b-%Y %I:%M %p')}")
+
+            if KNOWLEDGE_FILE.exists():
+                st.caption(f"Backup created: {backup_path.name}")
+
+            st.cache_data.clear()
+            st.cache_resource.clear()
+
+            st.warning("Please refresh/re-run the app once to load the updated knowledge file.")
+
+        else:
+            st.error("Validation issues found. File was not activated.")
+            st.dataframe(validation_df, use_container_width=True, hide_index=True)
+
+            csv = validation_df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "Download Validation Report",
+                csv,
+                file_name="knowledge_validation_report.csv",
+                mime="text/csv"
+            )
+
+    st.markdown("---")
+    st.markdown("### Current Knowledge Base Summary")
+
+    summary_df, err = knowledge_file_summary(KNOWLEDGE_FILE)
+
+    if err:
+        st.error(f"Error reading current knowledge file: {err}")
+    elif summary_df.empty:
+        st.info("No knowledge file summary available.")
+    else:
+        st.dataframe(summary_df, use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+    st.markdown("### Validate Current Knowledge File")
+
+    if st.button("Run Validation on Current Knowledge File"):
+        current_validation_df = validate_knowledge_file(KNOWLEDGE_FILE)
+
+        if current_validation_df.empty:
+            st.success("No validation issues found in the current knowledge file.")
+        else:
+            st.warning(f"{len(current_validation_df)} issue(s) found.")
+            st.dataframe(current_validation_df, use_container_width=True, hide_index=True)
+
+            csv = current_validation_df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "Download Current Validation Report",
+                csv,
+                file_name="current_knowledge_validation_report.csv",
+                mime="text/csv"
+            )
+
+    st.markdown("---")
+    st.markdown("### Preview Uploaded/Current Sheets")
+
+    try:
+        xl = pd.ExcelFile(KNOWLEDGE_FILE)
+        selected_sheet = st.selectbox("Select sheet to preview", xl.sheet_names, key="knowledge_preview_sheet")
+        preview_df = pd.read_excel(KNOWLEDGE_FILE, sheet_name=selected_sheet).fillna("")
+        st.dataframe(preview_df.head(100), use_container_width=True)
+        st.caption("Showing first 100 rows only.")
+    except Exception as e:
+        st.error(f"Unable to preview knowledge file: {e}")
 
 # =====================================================
 # LOGOUT
@@ -1694,9 +1832,6 @@ with right:
 # =====================================================
 
 if st.session_state.role == "Admin":
-    with st.expander("📊 Admin Analytics Dashboard", expanded=False):
-        render_admin_analytics_dashboard()
-
     with st.expander("Admin Panel: User Management"):
         st.markdown("### Reset Employee Password")
         reset_emp_id = st.text_input("Employee ID to reset", placeholder="Example: 1001")
