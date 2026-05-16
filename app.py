@@ -1907,23 +1907,24 @@ with right:
                     else:
                         st.markdown(item["answer"])
 
-# Admin-only metadata
 if st.session_state.role == "Admin":
 
     st.markdown("---")
-    
+
     st.markdown("# 💼 Payroll & Tax Engine Setup")
-    
-    st.info("New module added: Salary Structure Master. Open the panel below to edit Sodexo, HRA, reimbursements, allowances and tax computation fields.")
 
-    with st.expander("💼 Salary Structure Master - NEW", expanded=True):
+    st.info(
+        "New module added: Salary Structure Master. "
+        "Open the panel below to edit Sodexo, HRA, "
+        "reimbursements, allowances and tax computation fields."
+    )
+
+    with st.expander(
+        "💼 Salary Structure Master - NEW",
+        expanded=True
+    ):
+
         render_salary_structure_master_panel()
-
-                        st.caption(
-                            f"Source: {item.get('source','')} · "
-                            f"Similarity: {item.get('similarity',0):.2f}"
-                        )
-
     # Bottom chat input (always at the bottom, widget-style)
     user_query = st.chat_input("Type your question and press Enter… (e.g. What is NPS?)")
     if user_query and user_query.strip():
