@@ -2872,10 +2872,20 @@ def render_employee_master_upload_panel():
                 if st.button("📤 Upload Employee Master", use_container_width=True):
                     result = upload_employee_master(df, upload_month, tax_year)
                     if result["success"]:
-                        st.success(f"Upload Complete | Inserted: {result['inserted']} | Updated: {result['updated']}")
+                        st.success(
+                            f"Upload Complete | Inserted: {result['inserted']} | Updated: {result['updated']}"
+                        )
+
+                        st.cache_data.clear()
+
+                        saved_df = load_employee_master()
+
+                        st.markdown("### Saved Employee Master Records")
+                        st.dataframe(saved_df, use_container_width=True, hide_index=True)
+
                         if result["errors"]:
                             st.warning("Some rows had errors")
-                            st.dataframe(pd.DataFrame({"Errors": result["errors"]}), use_container_width=True)
+                            st.dataframe(pd.DataFrame({"Errors": result["errors"]}))
                     else:
                         st.error(result["message"])
         except Exception as e:
