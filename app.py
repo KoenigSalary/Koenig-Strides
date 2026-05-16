@@ -1327,6 +1327,169 @@ def submit_query(query):
     ans = generate_response(query, results)
     st.session_state.chat_history.append({"query":query,"type":"answer","answer":ans,"similarity":sim,"source":safe_get(top,"Source")})
 
+# =====================================================
+# EMPLOYEE MASTER DATABASE
+# =====================================================
+
+def init_employee_master_table():
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS employee_master (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            employee_id TEXT UNIQUE,
+            employee_name TEXT,
+            email TEXT,
+            pan_no TEXT,
+            gender TEXT,
+            dob TEXT,
+            doj TEXT,
+            doe TEXT,
+            designation TEXT,
+            department TEXT,
+            branch TEXT,
+            tax_regime TEXT,
+            annual_salary REAL,
+            monthly_salary REAL,
+            basic_percent REAL,
+            status TEXT,
+            upload_month TEXT,
+            tax_year TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        )
+    """)
+
+    conn.commit()
+    conn.close()
+
+# =====================================================
+# EMPLOYEE MASTER UPLOAD
+# =====================================================
+
+def upload_employee_master(df, upload_month, tax_year):
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    inserted = 0
+    updated = 0
+    errors = []
+
+    required_columns = [
+        "EmployeeID",
+        "EmployeeName",
+        "Email",
+        "PAN",
+        "Gender",
+        "DOB",
+        "DOJ",
+        "Designation",
+        "Department",
+        "Branch",
+        "TaxRegime",
+        "AnnualSalary",
+        "MonthlySalary",
+        "BasicPercent",
+        "Status"
+    ]
+
+    missing_cols = [c for c in required_columns if c not in df.columns]
+
+    if missing_cols:
+        return {
+            "success": False,
+            "message": f"Missing columns: {', '.join(missing_cols)}"
+        }
+
+    for idx, row in df.iterrows():
+
+        try:
+            employee_id = str(row.get("EmployeeID", "")).strip()
+
+            if not employee_id:
+                errors.append(f"Row {idx+1}: Missing Employee ID")
+                continue
+
+            cur.execute(
+                "SELECT employee_id FROM employee_master WHERE employee_id = ?",
+                (employee_id,)
+            )
+
+            exists = cur.fetchone()
+
+            values = (
+                employee_id,
+                str(row.get("EmployeeName", "")),
+                str(row.get("Email", "")),
+                str(row.get("PAN", "")),
+                str(row.get("Gender", "")),
+                str(row.get("DOB", "")),
+                str(row.get("DOJ", "")),
+                str(row.get("DOE", "")),
+                str(row.get("Designation", "")),
+                str(row.get("Department", "")),
+                str(row.get("Branch", "")),
+                str(row.get("TaxRegime", "New")),
+    }
+
+# =====================================================
+# EMPLOYEE MASTER PANEL
+# =====================================================
+
+def render_employee_master_upload_panel():
+
+    st.markdown("## 👥 Employee Master Upload")
+
+    upload_month = st.text_input(
+        "Upload Month",
+        value=datetime.now().strftime("%B %Y")
+    )
+
+    tax_year = st.text_input(
+        "Tax Year",
+        value="2026-27"
+    )
+
+    uploaded_file = st.file_uploader(
+        "Upload Employee Master Excel",
+        type=["xlsx", "xls"]
+    )
+
+    if uploaded_file:
+
+        try:
+            df = pd.read_excel(uploaded_file)
+
+            st.success(f"File Loaded Successfully — {len(df)} records")
+
+            st.dataframe(df.head(20), use_container_width=True)
+
+            if st.button("📤 Upload Employee Master", use_container_width=True):
+
+                result = upload_employee_master(
+                    df,
+                    upload_month,
+                    tax_year
+                )
+
+                if result["success"]:
+
+                    st.success(
+                        f"Upload Complete | Inserted: {result['inserted']} | Updated: {result['updated']}"
+                    )
+
+                    if result["errors"]:
+                        st.warning("Some rows had errors")
+                        st.dataframe(pd.DataFrame({"Errors": result["errors"]}))
+
+                else:
+                    st.error(result["message"])
+
+        except Exception as e:
+            st.error(f"Upload failed: {e}")
+
 
 # =====================================================
 # PAYROLL + TAX DATABASE FOUNDATION
