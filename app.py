@@ -2614,26 +2614,26 @@ def render_admin_declaration_approval_panel():
     
     def get_declaration_sections():
 
-    return [
-        "80C",
-        "80D",
-        "NPS 80CCD(1B)",
-        "Employer NPS 80CCD(2)",
-        "HRA",
-        "Home Loan Interest",
-        "LTA",
-        "Donation",
-        "Meal Passes / Sodexo Declaration",
-        "Telephone / Internet",
-        "Electricity Reimbursement",
-        "Professional / Software",
-        "Skill Development",
-        "Power & Utility Allowance",
-        "Form 12B",
-        "Form 12BB",
-        "Previous Employer Income",
-        "Other Deduction"
-    ]
+        return [
+            "80C",
+            "80D",
+            "NPS 80CCD(1B)",
+            "Employer NPS 80CCD(2)",
+            "HRA",
+            "Home Loan Interest",
+            "LTA",
+            "Donation",
+            "Meal Passes / Sodexo Declaration",
+            "Telephone / Internet",
+            "Electricity Reimbursement",
+            "Professional / Software",
+            "Skill Development",
+            "Power & Utility Allowance",
+            "Form 12B",
+            "Form 12BB",
+            "Previous Employer Income",
+            "Other Deduction"
+        ]
 
     if st.button("✅ Submit Updates", use_container_width=True):
         updated_count = 0
