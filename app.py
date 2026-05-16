@@ -1907,11 +1907,13 @@ with right:
                     else:
                         st.markdown(item["answer"])
 
-                    # Admin-only metadata
-                    if st.session_state.role == "Admin":
+# Admin-only metadata
+if st.session_state.role == "Admin":
 
     st.markdown("---")
+    
     st.markdown("# 💼 Payroll & Tax Engine Setup")
+    
     st.info("New module added: Salary Structure Master. Open the panel below to edit Sodexo, HRA, reimbursements, allowances and tax computation fields.")
 
     with st.expander("💼 Salary Structure Master - NEW", expanded=True):
