@@ -2831,6 +2831,63 @@ def load_employee_master():
     conn.close()
     return df.fillna("")
 
+def update_employee_master_record(employee_id, data):
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    cur.execute("""
+        UPDATE employee_master
+        SET employee_name = ?,
+            email = ?,
+            pan_no = ?,
+            gender = ?,
+            dob = ?,
+            doj = ?,
+            doe = ?,
+            designation = ?,
+            department = ?,
+            branch = ?,
+            tax_regime = ?,
+            annual_salary = ?,
+            monthly_salary = ?,
+            basic_percent = ?,
+            status = ?,
+            updated_at = ?
+        WHERE employee_id = ?
+    """, (
+        data["employee_name"],
+        data["email"],
+        data["pan_no"],
+        data["gender"],
+        data["dob"],
+        data["doj"],
+        data["doe"],
+        data["designation"],
+        data["department"],
+        data["branch"],
+        data["tax_regime"],
+        float(data["annual_salary"]),
+        float(data["monthly_salary"]),
+        float(data["basic_percent"]),
+        data["status"],
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        employee_id
+    ))
+
+    conn.commit()
+    conn.close()
+
+def delete_employee_master_record(employee_id):
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    cur.execute(
+        "DELETE FROM employee_master WHERE employee_id = ?",
+        (employee_id,)
+    )
+
+    conn.commit()
+    conn.close()
 
 def render_employee_master_upload_panel():
     st.markdown("## 👥 Employee Master Upload")
