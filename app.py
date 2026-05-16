@@ -2368,7 +2368,7 @@ def render_employee_declaration_portal():
             st.success("Within configured limit")
     previous_employer_income = 0.0
     previous_employer_tds = 0.0
-    if section in ["Form 12B / 12BB", "Previous Employer Income"] or declaration_type in ["Form 12B / 12BB", "Previous Employer"]:
+    if section in ["Form 12B", "Form 12BB", "Previous Employer Income"]: or declaration_type in ["Form 12B / 12BB", "Previous Employer"]:
         st.markdown("#### Previous Employer / Form 12B-12BB Details")
         p1, p2 = st.columns(2)
         with p1:
@@ -2503,6 +2503,12 @@ def render_admin_declaration_approval_panel():
         st.info("No matching declarations.")
         return
 
+    st.markdown("### Pending Employee Declarations")
+
+    if filtered.empty:
+        st.info("No declarations submitted yet.")
+        return
+
     st.markdown("#### Step 1: Update Status in Table")
 
     editable_cols = [
@@ -2555,7 +2561,66 @@ def render_admin_declaration_approval_panel():
         }
     )
 
-    st.info("Use the Status dropdown inside the table. Then click Submit Updates.")
+    st.info(
+        "Change Status from the dropdown. Use Approved / Rejected / Delete. "
+        "Then click Submit Updates below."
+    )
+
+    if st.button("✅ Submit Updates", use_container_width=True):
+
+        updated_count = 0
+        deleted_count = 0
+
+        for _, row in edited_df.iterrows():
+
+            row_id = int(row["id"])
+            status = str(row.get("status", "Pending"))
+            approved_amount = float(row.get("approved_amount", 0) or 0)
+            admin_remarks = str(row.get("admin_remarks", "") or "")
+
+            if status == "Delete":
+                delete_declaration(row_id)
+                deleted_count += 1
+
+                else:
+                    update_declaration_status(
+                    row_id,
+                    status,
+                    approved_amount,
+                    admin_remarks,
+                    st.session_state.employee_name or "Admin"
+                )
+                updated_count += 1
+
+        st.success(
+            f"Declaration approvals updated. Updated: {updated_count}, Deleted: {deleted_count}"
+        )
+
+        st.rerun()
+        st.info("Use the Status dropdown inside the table. Then click Submit Updates.")
+    
+    def get_declaration_sections():
+
+    return [
+        "80C",
+        "80D",
+        "NPS 80CCD(1B)",
+        "Employer NPS 80CCD(2)",
+        "HRA",
+        "Home Loan Interest",
+        "LTA",
+        "Donation",
+        "Meal Passes / Sodexo Declaration",
+        "Telephone / Internet",
+        "Electricity Reimbursement",
+        "Professional / Software",
+        "Skill Development",
+        "Power & Utility Allowance",
+        "Form 12B",
+        "Form 12BB",
+        "Previous Employer Income",
+        "Other Deduction"
+    ]
 
     if st.button("✅ Submit Updates", use_container_width=True):
         updated_count = 0
