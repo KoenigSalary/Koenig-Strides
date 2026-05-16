@@ -123,7 +123,7 @@ body.is-login-page [data-testid="stHeader"] { display:none; }
 }
 
 /* The dark login card is the FIRST column on the login page.
-   We target the column container directly so Streamlit widgets render
+   We target the column container directly so Streamlit widgets 
    INSIDE the styled card (instead of escaping a raw <div>). */
 body.is-login-page [data-testid="column"]:first-child {
     background:
@@ -1092,7 +1092,7 @@ def get_module_for_row(row):
     if category in TAX_CATEGORIES:
         return "Tax FAQs"
     # NOTE: SPOC Routing module is now powered exclusively by the SPOC Master
-    # sheet via render_spoc_routing(). FAQ rows are no longer routed here
+    # sheet via _spoc_routing(). FAQ rows are no longer routed here
     # — they will fall through to Entity Nexus / Compliance / Tax instead.
     if is_protected(row):
         return "Protected Information Routing"
@@ -1104,8 +1104,8 @@ def get_module_for_row(row):
         return "Salary Queries"
     return "Tax FAQs"
 
-def render_spoc_routing():
-    """Render the SPOC Routing module — sourced ONLY from the SPOC Master sheet."""
+def _spoc_routing():
+    """ the SPOC Routing module — sourced ONLY from the SPOC Master sheet."""
     if spoc_df.empty:
         st.warning("SPOC Master sheet not found in the knowledge file.")
         return
@@ -1206,7 +1206,7 @@ def get_questions_by_module_category(df, module, category):
         filtered = filtered[filtered[q_col].astype(str).str.strip() != ""]
     return filtered
 
-def render_answer(row):
+def _answer(row):
     if is_protected(row):
         spoc, email = get_spoc(row)
         email_html = f"<br><b>Email:</b> {email}" if email else ""
@@ -1739,7 +1739,7 @@ def calculate_salary_split(annual_salary, basic_percent=40):
     return result
 
 
-def render_salary_structure_master_panel():
+def _salary_structure_master_panel():
     st.markdown("### 💼 Salary Structure Master")
     st.caption("Edit Sodexo, HRA, reimbursements, allowances, proof rules and taxable status.")
 
@@ -2029,7 +2029,7 @@ def import_tds_monthly(df, tax_year, salary_month, mode):
     return count, ""
 
 
-def render_payroll_upload_engine():
+def _payroll_upload_engine():
     st.markdown("### 📤 Payroll Upload Engine")
     st.caption("Upload Employee Master, Salary Computation Excel, and TDS Excel.")
 
@@ -2087,7 +2087,7 @@ def render_payroll_upload_engine():
             st.error(f"Unable to process uploaded file: {e}")
 
 
-def render_payroll_data_preview():
+def _payroll_data_preview():
     st.markdown("### 📊 Payroll Data Preview")
 
     init_payroll_database()
@@ -2114,7 +2114,7 @@ def render_payroll_data_preview():
     conn.close()
 
 
-def render_tax_output_fields():
+def _tax_output_fields():
     st.markdown("### 🧾 Income Breakup + Tax Output Fields")
 
     fields = pd.DataFrame([
@@ -2161,7 +2161,7 @@ def render_tax_output_fields():
     st.dataframe(fields, use_container_width=True, hide_index=True)
 
 
-def render_payroll_tax_engine_panel():
+def _payroll_tax_engine_panel():
     st.markdown("## 💼 Payroll & Tax Engine Setup")
     st.info("Admin module: salary structure, payroll upload engine, TDS upload and payroll data preview.")
 
@@ -2173,16 +2173,16 @@ def render_payroll_tax_engine_panel():
     ])
 
     with tab1:
-        render_salary_structure_master_panel()
+        _salary_structure_master_panel()
 
     with tab2:
-        render_payroll_upload_engine()
+        _payroll_upload_engine()
 
     with tab3:
-        render_payroll_data_preview()
+        _payroll_data_preview()
 
     with tab4:
-        render_tax_output_fields()
+        _tax_output_fields()
 
 
 # Initialize payroll DB early
@@ -2321,7 +2321,7 @@ def delete_declaration(row_id):
     conn.close()
 
 
-def render_employee_declaration_portal():
+def _employee_declaration_portal():
     st.markdown("### 🧾 Employee Declaration Portal")
     st.caption("Submit investment proofs, reimbursements, Meal Passes/Sodexo, and Form 12B/12BB.")
     employee_id = str(st.session_state.employee_id)
@@ -2383,7 +2383,7 @@ def render_employee_declaration_portal():
 
 
 
-def render_inline_proof_viewer(proof_path):
+def _inline_proof_viewer(proof_path):
     proof_path = str(proof_path or "").strip()
 
     if not proof_path:
@@ -2403,22 +2403,19 @@ def render_inline_proof_viewer(proof_path):
             st.image(str(path_obj), caption=path_obj.name, use_container_width=True)
 
         elif suffix == ".pdf":
-            with open(path_obj, "rb") as f:
-                pdf_bytes = f.read()
 
-            base64_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
+            with open(path_obj, "rb") as pdf_file:
+                PDFbyte = pdf_file.read()
 
-            st.markdown(
-                f"""
-                <iframe
-                    src="data:application/pdf;base64,{base64_pdf}"
-                    width="100%"
-                    height="650px"
-                    style="border:1px solid #dbe3ef; border-radius:12px;">
-                </iframe>
-                """,
-                unsafe_allow_html=True
+            st.download_button(
+                label="📄 Open / Download PDF Proof",
+                data=PDFbyte,
+                file_name=path_obj.name,
+                mime="application/pdf",
+                use_container_width=True
             )
+
+            st.info("Chrome blocks embedded PDF preview on Streamlit Cloud. Use the button above to open the proof.")
 
         elif suffix in [".xlsx", ".xls"]:
             preview_df = pd.read_excel(path_obj).fillna("")
@@ -2440,7 +2437,7 @@ def render_inline_proof_viewer(proof_path):
         st.warning(f"Unable to preview proof: {e}")
 
 
-def render_admin_declaration_approval_panel():
+def _admin_declaration_approval_panel():
     st.markdown("### ✅ Investment / Declaration Approval Panel")
     st.caption("Change status in the table, enter approved amount/remarks, then click Submit Updates.")
 
