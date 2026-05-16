@@ -1327,169 +1327,6 @@ def submit_query(query):
     ans = generate_response(query, results)
     st.session_state.chat_history.append({"query":query,"type":"answer","answer":ans,"similarity":sim,"source":safe_get(top,"Source")})
 
-# =====================================================
-# EMPLOYEE MASTER DATABASE
-# =====================================================
-
-def init_employee_master_table():
-    conn = get_db_connection()
-    cur = conn.cursor()
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS employee_master (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            employee_id TEXT UNIQUE,
-            employee_name TEXT,
-            email TEXT,
-            pan_no TEXT,
-            gender TEXT,
-            dob TEXT,
-            doj TEXT,
-            doe TEXT,
-            designation TEXT,
-            department TEXT,
-            branch TEXT,
-            tax_regime TEXT,
-            annual_salary REAL,
-            monthly_salary REAL,
-            basic_percent REAL,
-            status TEXT,
-            upload_month TEXT,
-            tax_year TEXT,
-            created_at TEXT,
-            updated_at TEXT
-        )
-    """)
-
-    conn.commit()
-    conn.close()
-
-# =====================================================
-# EMPLOYEE MASTER UPLOAD
-# =====================================================
-
-def upload_employee_master(df, upload_month, tax_year):
-
-    conn = get_db_connection()
-    cur = conn.cursor()
-
-    inserted = 0
-    updated = 0
-    errors = []
-
-    required_columns = [
-        "EmployeeID",
-        "EmployeeName",
-        "Email",
-        "PAN",
-        "Gender",
-        "DOB",
-        "DOJ",
-        "Designation",
-        "Department",
-        "Branch",
-        "TaxRegime",
-        "AnnualSalary",
-        "MonthlySalary",
-        "BasicPercent",
-        "Status"
-    ]
-
-    missing_cols = [c for c in required_columns if c not in df.columns]
-
-    if missing_cols:
-        return {
-            "success": False,
-            "message": f"Missing columns: {', '.join(missing_cols)}"
-        }
-
-    for idx, row in df.iterrows():
-
-        try:
-            employee_id = str(row.get("EmployeeID", "")).strip()
-
-            if not employee_id:
-                errors.append(f"Row {idx+1}: Missing Employee ID")
-                continue
-
-            cur.execute(
-                "SELECT employee_id FROM employee_master WHERE employee_id = ?",
-                (employee_id,)
-            )
-
-            exists = cur.fetchone()
-
-            values = (
-                employee_id,
-                str(row.get("EmployeeName", "")),
-                str(row.get("Email", "")),
-                str(row.get("PAN", "")),
-                str(row.get("Gender", "")),
-                str(row.get("DOB", "")),
-                str(row.get("DOJ", "")),
-                str(row.get("DOE", "")),
-                str(row.get("Designation", "")),
-                str(row.get("Department", "")),
-                str(row.get("Branch", "")),
-                str(row.get("TaxRegime", "New")),
-    }
-
-# =====================================================
-# EMPLOYEE MASTER PANEL
-# =====================================================
-
-def render_employee_master_upload_panel():
-
-    st.markdown("## 👥 Employee Master Upload")
-
-    upload_month = st.text_input(
-        "Upload Month",
-        value=datetime.now().strftime("%B %Y")
-    )
-
-    tax_year = st.text_input(
-        "Tax Year",
-        value="2026-27"
-    )
-
-    uploaded_file = st.file_uploader(
-        "Upload Employee Master Excel",
-        type=["xlsx", "xls"]
-    )
-
-    if uploaded_file:
-
-        try:
-            df = pd.read_excel(uploaded_file)
-
-            st.success(f"File Loaded Successfully — {len(df)} records")
-
-            st.dataframe(df.head(20), use_container_width=True)
-
-            if st.button("📤 Upload Employee Master", use_container_width=True):
-
-                result = upload_employee_master(
-                    df,
-                    upload_month,
-                    tax_year
-                )
-
-                if result["success"]:
-
-                    st.success(
-                        f"Upload Complete | Inserted: {result['inserted']} | Updated: {result['updated']}"
-                    )
-
-                    if result["errors"]:
-                        st.warning("Some rows had errors")
-                        st.dataframe(pd.DataFrame({"Errors": result["errors"]}))
-
-                else:
-                    st.error(result["message"])
-
-        except Exception as e:
-            st.error(f"Upload failed: {e}")
-
 
 # =====================================================
 # PAYROLL + TAX DATABASE FOUNDATION
@@ -2833,6 +2670,221 @@ def logout():
     st.rerun()
 
 
+
+# =====================================================
+# EMPLOYEE MASTER DATABASE + UPLOAD
+# =====================================================
+
+def init_employee_master_table():
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS employee_master (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            employee_id TEXT UNIQUE,
+            employee_name TEXT,
+            email TEXT,
+            pan_no TEXT,
+            gender TEXT,
+            dob TEXT,
+            doj TEXT,
+            doe TEXT,
+            designation TEXT,
+            department TEXT,
+            branch TEXT,
+            tax_regime TEXT,
+            annual_salary REAL DEFAULT 0,
+            monthly_salary REAL DEFAULT 0,
+            basic_percent REAL DEFAULT 50,
+            status TEXT DEFAULT 'Active',
+            upload_month TEXT,
+            tax_year TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        )
+    """)
+    cur.execute("PRAGMA table_info(employee_master)")
+    existing_cols = [row[1] for row in cur.fetchall()]
+    extra_cols = {
+        "email": "TEXT",
+        "department": "TEXT",
+        "branch": "TEXT",
+        "annual_salary": "REAL DEFAULT 0",
+        "monthly_salary": "REAL DEFAULT 0",
+        "basic_percent": "REAL DEFAULT 50",
+        "status": "TEXT DEFAULT 'Active'",
+        "upload_month": "TEXT",
+        "tax_year": "TEXT",
+        "created_at": "TEXT",
+        "updated_at": "TEXT"
+    }
+    for col, definition in extra_cols.items():
+        if col not in existing_cols:
+            cur.execute(f"ALTER TABLE employee_master ADD COLUMN {col} {definition}")
+    conn.commit()
+    conn.close()
+
+
+def normalize_employee_master_columns(df):
+    aliases = {
+        "EmployeeID": ["EmployeeID", "Employee ID", "Emp ID", "EmpCode", "Employee Code"],
+        "EmployeeName": ["EmployeeName", "Employee Name", "Emp Name", "Name"],
+        "Email": ["Email", "Email ID", "Official Email", "Official Email ID"],
+        "PAN": ["PAN", "PAN No", "Pan No.", "PAN Number"],
+        "Gender": ["Gender"],
+        "DOB": ["DOB", "Date of Birth"],
+        "DOJ": ["DOJ", "Date of Joining", "Joining Date"],
+        "DOE": ["DOE", "Date of Exit", "Exit Date"],
+        "Designation": ["Designation"],
+        "Department": ["Department"],
+        "Branch": ["Branch", "Location", "Base Location"],
+        "TaxRegime": ["TaxRegime", "Tax Regime", "Regime"],
+        "AnnualSalary": ["AnnualSalary", "Annual Salary", "Annual CTC", "CTC"],
+        "MonthlySalary": ["MonthlySalary", "Monthly Salary", "Salary"],
+        "BasicPercent": ["BasicPercent", "Basic Percent", "Basic %"],
+        "Status": ["Status", "Employee Status"]
+    }
+    current = {str(c).strip().lower().replace(" ", "").replace(".", "").replace("_", ""): c for c in df.columns}
+    rename_map = {}
+    for target, options in aliases.items():
+        for opt in options:
+            key = str(opt).strip().lower().replace(" ", "").replace(".", "").replace("_", "")
+            if key in current:
+                rename_map[current[key]] = target
+                break
+    return df.rename(columns=rename_map)
+
+
+def upload_employee_master(df, upload_month, tax_year):
+    init_employee_master_table()
+    df = normalize_employee_master_columns(df.copy()).fillna("")
+    required = ["EmployeeID", "EmployeeName", "Email", "PAN", "Gender", "DOB", "DOJ", "Designation", "Department", "Branch", "TaxRegime", "AnnualSalary", "MonthlySalary", "BasicPercent", "Status"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        return {"success": False, "message": "Missing columns: " + ", ".join(missing), "inserted": 0, "updated": 0, "errors": []}
+
+    inserted, updated, errors = 0, 0, []
+    conn = get_db_connection()
+    cur = conn.cursor()
+    for idx, row in df.iterrows():
+        try:
+            employee_id = str(row.get("EmployeeID", "")).strip()
+            if not employee_id:
+                errors.append(f"Row {idx + 2}: Missing Employee ID")
+                continue
+            def num(x, default=0):
+                try:
+                    return float(str(x).replace(",", "") or default)
+                except Exception:
+                    return default
+            vals = {
+                "employee_name": str(row.get("EmployeeName", "")).strip(),
+                "email": str(row.get("Email", "")).strip(),
+                "pan_no": str(row.get("PAN", "")).strip(),
+                "gender": str(row.get("Gender", "")).strip(),
+                "dob": str(row.get("DOB", "")).strip(),
+                "doj": str(row.get("DOJ", "")).strip(),
+                "doe": str(row.get("DOE", "")).strip(),
+                "designation": str(row.get("Designation", "")).strip(),
+                "department": str(row.get("Department", "")).strip(),
+                "branch": str(row.get("Branch", "")).strip(),
+                "tax_regime": str(row.get("TaxRegime", "New")).strip() or "New",
+                "annual_salary": num(row.get("AnnualSalary", 0)),
+                "monthly_salary": num(row.get("MonthlySalary", 0)),
+                "basic_percent": num(row.get("BasicPercent", 50), 50),
+                "status": str(row.get("Status", "Active")).strip() or "Active",
+                "upload_month": upload_month,
+                "tax_year": tax_year,
+                "now": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+            cur.execute("SELECT employee_id FROM employee_master WHERE employee_id = ?", (employee_id,))
+            exists = cur.fetchone()
+            if exists:
+                cur.execute("""
+                    UPDATE employee_master SET employee_name=?, email=?, pan_no=?, gender=?, dob=?, doj=?, doe=?, designation=?, department=?, branch=?, tax_regime=?, annual_salary=?, monthly_salary=?, basic_percent=?, status=?, upload_month=?, tax_year=?, updated_at=? WHERE employee_id=?
+                """, (vals["employee_name"], vals["email"], vals["pan_no"], vals["gender"], vals["dob"], vals["doj"], vals["doe"], vals["designation"], vals["department"], vals["branch"], vals["tax_regime"], vals["annual_salary"], vals["monthly_salary"], vals["basic_percent"], vals["status"], vals["upload_month"], vals["tax_year"], vals["now"], employee_id))
+                updated += 1
+            else:
+                cur.execute("""
+                    INSERT INTO employee_master (employee_id, employee_name, email, pan_no, gender, dob, doj, doe, designation, department, branch, tax_regime, annual_salary, monthly_salary, basic_percent, status, upload_month, tax_year, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (employee_id, vals["employee_name"], vals["email"], vals["pan_no"], vals["gender"], vals["dob"], vals["doj"], vals["doe"], vals["designation"], vals["department"], vals["branch"], vals["tax_regime"], vals["annual_salary"], vals["monthly_salary"], vals["basic_percent"], vals["status"], vals["upload_month"], vals["tax_year"], vals["now"], vals["now"]))
+                inserted += 1
+        except Exception as e:
+            errors.append(f"Row {idx + 2}: {str(e)}")
+    conn.commit()
+    conn.close()
+    return {"success": True, "inserted": inserted, "updated": updated, "errors": errors}
+
+
+def load_employee_master():
+    init_employee_master_table()
+    conn = get_db_connection()
+    df = pd.read_sql_query("SELECT * FROM employee_master ORDER BY employee_id", conn)
+    conn.close()
+    return df.fillna("")
+
+
+def render_employee_master_upload_panel():
+    st.markdown("## 👥 Employee Master Upload")
+    st.caption("Upload or update employees for Koenig Stride payroll and tax computation.")
+    c1, c2 = st.columns(2)
+    with c1:
+        upload_month = st.text_input("Upload Month", value=datetime.now().strftime("%B %Y"), key="emp_master_upload_month")
+    with c2:
+        tax_year = st.text_input("Tax Year", value="2026-27", key="emp_master_tax_year")
+
+    with st.expander("Required Excel Format", expanded=False):
+        sample_df = pd.DataFrame([{
+            "EmployeeID": "1001", "EmployeeName": "Sample Employee", "Email": "employee@koenig-solutions.com",
+            "PAN": "ABCDE1234F", "Gender": "Male", "DOB": "1990-01-01", "DOJ": "2024-04-01",
+            "DOE": "", "Designation": "Executive", "Department": "Accounts", "Branch": "Delhi",
+            "TaxRegime": "New", "AnnualSalary": 1200000, "MonthlySalary": 100000, "BasicPercent": 40, "Status": "Active"
+        }])
+        st.dataframe(sample_df, use_container_width=True, hide_index=True)
+        st.download_button("⬇️ Download Sample Employee Master CSV", sample_df.to_csv(index=False).encode("utf-8"), file_name="employee_master_sample.csv", mime="text/csv", use_container_width=True)
+
+    uploaded_file = st.file_uploader("Upload Employee Master Excel", type=["xlsx", "xls"], key="employee_master_excel_upload")
+    if uploaded_file is not None:
+        try:
+            xl = pd.ExcelFile(uploaded_file)
+            sheet_name = st.selectbox("Select Sheet", xl.sheet_names, key="employee_master_sheet")
+            df = normalize_employee_master_columns(pd.read_excel(uploaded_file, sheet_name=sheet_name).fillna(""))
+            st.success(f"File loaded successfully — {len(df)} record(s)")
+            st.dataframe(df.head(50), use_container_width=True, hide_index=True)
+            required = ["EmployeeID", "EmployeeName", "Email", "PAN", "Gender", "DOB", "DOJ", "Designation", "Department", "Branch", "TaxRegime", "AnnualSalary", "MonthlySalary", "BasicPercent", "Status"]
+            missing = [c for c in required if c not in df.columns]
+            if missing:
+                st.error("Missing columns: " + ", ".join(missing))
+            else:
+                st.success("All required columns found.")
+                if st.button("📤 Upload Employee Master", use_container_width=True):
+                    result = upload_employee_master(df, upload_month, tax_year)
+                    if result["success"]:
+                        st.success(f"Upload Complete | Inserted: {result['inserted']} | Updated: {result['updated']}")
+                        if result["errors"]:
+                            st.warning("Some rows had errors")
+                            st.dataframe(pd.DataFrame({"Errors": result["errors"]}), use_container_width=True)
+                    else:
+                        st.error(result["message"])
+        except Exception as e:
+            st.error(f"Upload failed: {e}")
+
+    st.markdown("---")
+    st.markdown("### Current Employee Master")
+    emp_df = load_employee_master()
+    if emp_df.empty:
+        st.info("No employee master records found yet.")
+    else:
+        st.dataframe(emp_df, use_container_width=True, hide_index=True)
+        st.download_button("⬇️ Download Current Employee Master", emp_df.to_csv(index=False).encode("utf-8"), file_name="current_employee_master.csv", mime="text/csv", use_container_width=True)
+
+try:
+    init_employee_master_table()
+except Exception as e:
+    st.warning(f"Employee master table initialization warning: {e}")
+
+
 # =====================================================
 # PANEL NAVIGATION
 # =====================================================
@@ -2914,6 +2966,7 @@ with left:
         if st.session_state.role == "Admin":
             st.markdown("---")
             st.markdown("### 🛠️ Admin")
+            panel_button("👥 Employee Master Upload", "Employee Master Upload")
             panel_button("💼 Payroll & Tax Engine", "Payroll Tax Engine")
             panel_button("✅ Declaration Approval", "Declaration Approval")
             panel_button("👥 User Management", "User Management")
@@ -3089,6 +3142,9 @@ with right:
     # =====================================================
     # ADMIN PANELS
     # =====================================================
+    elif selected_panel == "Employee Master Upload" and st.session_state.role == "Admin":
+        render_employee_master_upload_panel()
+
     elif selected_panel == "Payroll Tax Engine" and st.session_state.role == "Admin":
         render_payroll_tax_engine_panel()
 
