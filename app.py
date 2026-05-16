@@ -16,11 +16,6 @@ try:
 except Exception:
     AI_AVAILABLE = False
 
-try:
-    from streamlit_mic_recorder import mic_recorder
-    MIC_RECORDER_AVAILABLE = True
-except Exception:
-    MIC_RECORDER_AVAILABLE = False
 
 # =====================================================
 # KOENIG STRIDE - POLISHED LOGIN UI + RESPONSIVE
@@ -1468,10 +1463,14 @@ def submit_query(query):
 
 
 # =====================================================
-# VOICE SARIKA HELPERS
+# VOICE SARIKA HELPERS - NATIVE STREAMLIT AUDIO INPUT
 # =====================================================
 
 def transcribe_audio_with_openai(audio_bytes):
+    """
+    Transcribe recorded microphone audio using OpenAI Whisper.
+    Requires OPENAI_API_KEY in Streamlit secrets.
+    """
     if client is None:
         return "", "OpenAI API key not available. Voice transcription requires OpenAI."
 
@@ -1491,7 +1490,11 @@ def transcribe_audio_with_openai(audio_bytes):
 
 
 def speak_button_html(text, button_label="🔊 Speak Reply"):
-    safe_text = html.escape(str(text)).replace("\n", " ")
+    """
+    Browser-based text-to-speech. No server dependency.
+    """
+    safe_text = html.escape(str(text)).replace("
+", " ")
     return f"""
     <button onclick="
         const msg = new SpeechSynthesisUtterance(`{safe_text}`);
@@ -1515,30 +1518,29 @@ def speak_button_html(text, button_label="🔊 Speak Reply"):
 
 def render_voice_sarika_panel():
     st.markdown("### 🎙️ Voice Sarika")
-    st.caption("Ask Sarika by voice. The recorded audio is transcribed and then sent to Koenig Stride.")
-
-    if not MIC_RECORDER_AVAILABLE:
-        st.warning("Voice recorder package is not installed. Please add `streamlit-mic-recorder` to requirements.txt.")
-        return
+    st.caption("Record your question, then click **Transcribe & Ask Sarika**.")
 
     if client is None:
         st.info("OpenAI API key is needed for voice transcription. Add OPENAI_API_KEY in Streamlit Secrets.")
         return
 
-    audio = mic_recorder(
-        start_prompt="🎙️ Start Recording",
-        stop_prompt="⏹️ Stop Recording",
-        just_once=True,
-        use_container_width=True,
-        key="sarika_voice_recorder"
+    if not hasattr(st, "audio_input"):
+        st.error("Your Streamlit version does not support native voice recording.")
+        st.info("Please upgrade Streamlit in requirements.txt, for example: streamlit>=1.40.0")
+        return
+
+    audio_file = st.audio_input(
+        "Record your question here",
+        key="sarika_native_audio_input"
     )
 
-    if audio and "bytes" in audio:
-        st.audio(audio["bytes"], format="audio/wav")
+    if audio_file is not None:
+        audio_bytes = audio_file.getvalue()
+        st.audio(audio_bytes, format="audio/wav")
 
-        if st.button("📝 Transcribe & Ask Sarika", use_container_width=True):
+        if st.button("📝 Transcribe & Ask Sarika", use_container_width=True, key="native_voice_transcribe_btn"):
             with st.spinner("Sarika is listening and thinking..."):
-                transcript, err = transcribe_audio_with_openai(audio["bytes"])
+                transcript, err = transcribe_audio_with_openai(audio_bytes)
 
                 if err:
                     st.error(f"Voice transcription failed: {err}")
