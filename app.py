@@ -2574,26 +2574,39 @@ def render_admin_declaration_approval_panel():
         for _, row in edited_df.iterrows():
 
             row_id = int(row["id"])
-            status = str(row.get("status", "Pending"))
-            approved_amount = float(row.get("approved_amount", 0) or 0)
-            admin_remarks = str(row.get("admin_remarks", "") or "")
+
+            status = str(
+                row.get("status", "Pending")
+            )
+
+            approved_amount = float(
+                row.get("approved_amount", 0) or 0
+            )
+
+            admin_remarks = str(
+                row.get("admin_remarks", "") or ""
+            )
 
             if status == "Delete":
+
                 delete_declaration(row_id)
                 deleted_count += 1
 
-                else:
-                    update_declaration_status(
+            else:
+
+                update_declaration_status(
                     row_id,
                     status,
                     approved_amount,
                     admin_remarks,
                     st.session_state.employee_name or "Admin"
                 )
+
                 updated_count += 1
 
         st.success(
-            f"Declaration approvals updated. Updated: {updated_count}, Deleted: {deleted_count}"
+            f"Declaration approvals updated. "
+            f"Updated: {updated_count}, Deleted: {deleted_count}"
         )
 
         st.rerun()
