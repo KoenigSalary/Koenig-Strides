@@ -1490,11 +1490,9 @@ def transcribe_audio_with_openai(audio_bytes):
 
 
 def speak_button_html(text, button_label="🔊 Speak Reply"):
-    """
-    Browser-based text-to-speech. No server dependency.
-    """
-    safe_text = html.escape(str(text)).replace("
-", " ")
+
+    safe_text = html.escape(str(text)).replace("\n", " ")
+
     return f"""
     <button onclick="
         const msg = new SpeechSynthesisUtterance(`{safe_text}`);
@@ -1512,9 +1510,10 @@ def speak_button_html(text, button_label="🔊 Speak Reply"):
         font-weight:700;
         cursor:pointer;
         margin-top:6px;
-    ">{button_label}</button>
+    ">
+        {button_label}
+    </button>
     """
-
 
 def render_voice_sarika_panel():
     st.markdown("### 🎙️ Voice Sarika")
