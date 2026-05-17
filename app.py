@@ -21,12 +21,12 @@ except Exception:
     AI_AVAILABLE = False
 
 # =====================================================
-# KOENIG STRIDES - POLISHED LOGIN UI + RESPONSIVE
+# KOENIG STRIDE - POLISHED LOGIN UI + RESPONSIVE
 # Streamlit-native layout, no broken HTML wrappers
 # =====================================================
 
 st.set_page_config(
-    page_title="Koenig Strides",
+    page_title="Koenig Stride",
     page_icon="🤖",
     layout="wide",
     initial_sidebar_state="collapsed"
@@ -37,12 +37,27 @@ EXCEL_PATH = BASE_DIR / "knowledge" / "Koenig_VoiceBot_FAQ_Master.xlsx"
 LOGO_PATH = BASE_DIR / "assets" / "koenig_logo.png"
 SARIKA_PATH = BASE_DIR / "assets" / "sarika.png"
 USERS_PATH = BASE_DIR / "users.csv"
-DB_PATH = BASE_DIR / "koenig_strides.db"
+DB_PATH = BASE_DIR / "koenig_stride.db"
 PROOF_FOLDER = BASE_DIR / "proof_uploads"
 PROOF_FOLDER.mkdir(exist_ok=True)
 
 DEFAULT_EMPLOYEE_PASSWORD = "Welcome@123"
-DEFAULT_ADMIN_PASSWORD = "admin123"
+
+# Admin password is loaded from Streamlit Secrets (recommended) and falls back
+# to a built-in default only for first-time bootstrap. Set ADMIN_PASSWORD in
+# Streamlit Cloud → Settings → Secrets so the source code never ships a secret.
+try:
+    DEFAULT_ADMIN_PASSWORD = st.secrets.get("ADMIN_PASSWORD", "admin123")
+except Exception:
+    DEFAULT_ADMIN_PASSWORD = "admin123"
+
+# When True, typing the default password Welcome@123 will auto-reset any
+# numeric employee account back to that password. Convenient for pilots, but
+# unsafe for production. Toggle off via st.secrets["ALLOW_DEFAULT_PWD_RESET"]=false.
+try:
+    ALLOW_DEFAULT_PWD_RESET = bool(st.secrets.get("ALLOW_DEFAULT_PWD_RESET", False))
+except Exception:
+    ALLOW_DEFAULT_PWD_RESET = False
 
 # =====================================================
 # IMAGE HELPERS
@@ -605,8 +620,41 @@ body.is-login-page [data-testid="column"]:first-child .stButton > button:hover {
 # USER MANAGEMENT
 # =====================================================
 
-def hash_password(password):
+# Password hashing: bcrypt for new hashes, SHA-256 verify kept for legacy
+# users.csv rows so existing accounts keep working until they next log in.
+try:
+    import bcrypt  # pip install bcrypt (added to requirements.txt)
+    _BCRYPT_AVAILABLE = True
+except Exception:
+    _BCRYPT_AVAILABLE = False
+
+
+def _legacy_sha256(password: str) -> str:
     return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
+
+def hash_password(password: str) -> str:
+    """Return a salted bcrypt hash. Falls back to SHA-256 only if bcrypt is
+    unavailable (which should not happen once requirements.txt is honoured)."""
+    if _BCRYPT_AVAILABLE:
+        return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt(rounds=12)).decode("utf-8")
+    return _legacy_sha256(password)
+
+
+def verify_password(password: str, stored_hash: str) -> bool:
+    """Verify a password against either a bcrypt hash (new) or a SHA-256 hex
+    digest (legacy). Returns True if it matches either format."""
+    if not stored_hash:
+        return False
+    stored = str(stored_hash)
+    # bcrypt hashes start with $2a$, $2b$, or $2y$
+    if _BCRYPT_AVAILABLE and stored.startswith(("$2a$", "$2b$", "$2y$")):
+        try:
+            return bcrypt.checkpw(password.encode("utf-8"), stored.encode("utf-8"))
+        except Exception:
+            return False
+    # Legacy SHA-256 hex digest (64 chars)
+    return _legacy_sha256(password) == stored
 
 def validate_password_strength(password):
     if len(password) < 8:
@@ -682,15 +730,27 @@ def authenticate_user(user_id, password):
     if not bool_from_str(row.get("active", "True")):
         return False, "This user is inactive. Please contact admin.", None
 
-    # Standard password check
-    if row["password_hash"] == hash_password(password):
+    # Standard password check (handles both bcrypt and legacy SHA-256 hashes)
+    stored = str(row.get("password_hash", ""))
+    if verify_password(password, stored):
+        # Silently upgrade legacy SHA-256 hashes to bcrypt on successful login.
+        if _BCRYPT_AVAILABLE and not stored.startswith(("$2a$", "$2b$", "$2y$")):
+            try:
+                first_login_flag = bool_from_str(row.get("first_login", "False"))
+                update_user_password(user_id, password, first_login=first_login_flag)
+                # Refresh row to reflect new hash
+                df_refreshed = load_users()
+                refreshed = df_refreshed[df_refreshed["user_id"].astype(str) == user_id]
+                if not refreshed.empty:
+                    row = refreshed.iloc[0]
+            except Exception:
+                pass  # Don't block login if upgrade fails
         return True, "", row
 
-    # Fallback: if the employee enters the default password Welcome@123,
-    # reset their stored hash to default and let them log in (they will be
-    # forced to change password on next step because first_login=True).
-    # This guarantees the default password always works for employees.
-    if user_id.isdigit() and password == DEFAULT_EMPLOYEE_PASSWORD:
+    # Optional fallback (controlled by ALLOW_DEFAULT_PWD_RESET in st.secrets).
+    # When enabled, typing Welcome@123 resets the employee back to the default
+    # password and forces a change on next login. Disable for production.
+    if ALLOW_DEFAULT_PWD_RESET and user_id.isdigit() and password == DEFAULT_EMPLOYEE_PASSWORD:
         update_user_password(user_id, DEFAULT_EMPLOYEE_PASSWORD, first_login=True)
         df = load_users()
         refreshed = df[df["user_id"].astype(str) == user_id]
@@ -708,11 +768,24 @@ def update_user_password(user_id, new_password, first_login=False):
     df.loc[idx, "password_hash"] = hash_password(new_password)
     df.loc[idx, "first_login"] = "True" if first_login else "False"
     save_users(df)
+    try:
+        write_audit_log(
+            "PASSWORD_UPDATED",
+            target_id=str(user_id),
+            details=f"first_login={first_login}",
+        )
+    except Exception:
+        pass
     return True
 
 def reset_employee_password(emp_id):
     ensure_employee_exists(emp_id)
-    return update_user_password(emp_id, DEFAULT_EMPLOYEE_PASSWORD, first_login=True)
+    result = update_user_password(emp_id, DEFAULT_EMPLOYEE_PASSWORD, first_login=True)
+    try:
+        write_audit_log("ADMIN_RESET_PASSWORD", target_id=str(emp_id))
+    except Exception:
+        pass
+    return result
 
 # =====================================================
 # SESSION
@@ -910,12 +983,12 @@ def login_screen():
         else:
             st.markdown("<div class='login-logo-wrap'><h2 style='color:#04123d;'>KOENIG</h2></div>", unsafe_allow_html=True)
 
-        # 2. Koenig Strides title (under logo, brand-colored)
+        # 2. Koenig Stride title (under logo, brand-colored)
         st.markdown("""
         <div class='login-stack'>
             <div class='login-title-row'>
                 <div class='login-title-icon'>☻</div>
-                <h1 class='login-title-text'>Koenig Strides</h1>
+                <h1 class='login-title-text'>Koenig Stride</h1>
             </div>
             <div class='login-subtitle'>Tax &amp; Entity Nexus Assistant — Step Forward</div>
         </div>
@@ -924,7 +997,7 @@ def login_screen():
         # 3. Welcome hero (under title)
         st.markdown("""
         <div class='login-hero-card'>
-            <h2>Welcome to Koenig Strides</h2>
+            <h2>Welcome to Koenig Stride</h2>
             <p>Your secure internal assistant for tax, salary, entity and SPOC guidance.</p>
         </div>
         """, unsafe_allow_html=True)
@@ -951,8 +1024,16 @@ def login_screen():
                         st.session_state.employee_id = user_id.strip()
                         st.session_state.employee_name = row.get("display_name", f"Employee {user_id}")
                         st.session_state.must_change_password = bool_from_str(row.get("first_login", "False"))
+                        try:
+                            write_audit_log("LOGIN_SUCCESS", target_id=user_id.strip(), details="role=Employee")
+                        except Exception:
+                            pass
                         st.rerun()
                     else:
+                        try:
+                            write_audit_log("LOGIN_FAILED", target_id=user_id.strip(), details=f"role=Employee; reason={msg}")
+                        except Exception:
+                            pass
                         st.error(msg)
         else:
             user_id = st.text_input("Admin Username", value="admin")
@@ -965,10 +1046,18 @@ def login_screen():
                     st.session_state.employee_id = "admin"
                     st.session_state.employee_name = row.get("display_name", "Admin")
                     st.session_state.must_change_password = bool_from_str(row.get("first_login", "False"))
+                    try:
+                        write_audit_log("LOGIN_SUCCESS", target_id="admin", details="role=Admin")
+                    except Exception:
+                        pass
                     st.rerun()
                 elif ok:
                     st.error("This is not an admin account.")
                 else:
+                    try:
+                        write_audit_log("LOGIN_FAILED", target_id=str(user_id).strip(), details=f"role=Admin; reason={msg}")
+                    except Exception:
+                        pass
                     st.error(msg)
 
         st.markdown("</div>", unsafe_allow_html=True)
@@ -986,7 +1075,7 @@ def force_password_change_screen():
     with c2:
         st.markdown("<div class='card'>", unsafe_allow_html=True)
         st.markdown("## 🔐 Change Password Required")
-        st.info("For security, please change your default password before using Koenig Strides.")
+        st.info("For security, please change your default password before using Koenig Stride.")
         new_password = st.text_input("New Password", type="password")
         confirm_password = st.text_input("Confirm New Password", type="password")
         if st.button("Update Password", use_container_width=True):
@@ -1230,7 +1319,7 @@ def render_answer(row):
         email_html = f"<br><b>Email:</b> {email}" if email else ""
         st.markdown(f"<div class='protected-box'><b>🔒 Protected Information</b><br>This information is protected and cannot be displayed here.<br><br>Please contact the designated SPOC:<br><b>SPOC:</b> {spoc}{email_html}</div>", unsafe_allow_html=True)
     else:
-        st.markdown(f"<div class='answer-box'><b>Koenig Strides Answer:</b><br>{get_answer_text(row)}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='answer-box'><b>Koenig Stride Answer:</b><br>{get_answer_text(row)}</div>", unsafe_allow_html=True)
 
 # =====================================================
 # SEARCH
@@ -1315,7 +1404,7 @@ SPOC: {safe_get(row, 'SPOC Name')}
 Email: {safe_get(row, 'SPOC Email')}
 """
     prompt = f"""
-You are Koenig Strides, an internal Tax & Entity Nexus Assistant.
+You are Koenig Stride, an internal Tax & Entity Nexus Assistant.
 Use only the knowledge base below. Do not invent facts. If Protected is YES, do not reveal protected information and route employee to SPOC.
 
 Knowledge Base:
@@ -1367,6 +1456,7 @@ def add_column_if_missing(cur, table_name, column_name, column_definition):
         cur.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}")
 
 
+@st.cache_resource(show_spinner=False)
 def init_payroll_database():
     conn = get_db_connection()
     cur = conn.cursor()
@@ -1513,9 +1603,47 @@ def init_payroll_database():
         )
     """)
 
+    # Audit log for sensitive actions (compliance / traceability)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT DEFAULT '',
+            actor_id TEXT DEFAULT '',
+            actor_role TEXT DEFAULT '',
+            action TEXT DEFAULT '',
+            target_id TEXT DEFAULT '',
+            details TEXT DEFAULT ''
+        )
+    """)
+
     conn.commit()
     conn.close()
     seed_salary_structure_master()
+
+
+def write_audit_log(action, target_id="", details=""):
+    """Record a sensitive action. Best-effort — never raises."""
+    try:
+        actor_id = str(st.session_state.get("employee_id", "") or "")
+        actor_role = str(st.session_state.get("role", "") or "")
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO audit_log (timestamp, actor_id, actor_role, action, target_id, details)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                actor_id,
+                actor_role,
+                str(action)[:120],
+                str(target_id)[:120],
+                str(details)[:500],
+            ),
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
 
 
 def seed_salary_structure_master():
@@ -1602,7 +1730,6 @@ def text_value(row, col):
 
 
 def load_salary_structure_master():
-    init_payroll_database()
     conn = get_db_connection()
     df = pd.read_sql_query("SELECT * FROM salary_structure_master ORDER BY sort_order, id", conn)
     conn.close()
@@ -1610,7 +1737,6 @@ def load_salary_structure_master():
 
 
 def save_salary_structure_master(df):
-    init_payroll_database()
     save_df = df.copy().fillna("")
 
     required_cols = [
@@ -1859,7 +1985,6 @@ def render_salary_structure_master_panel():
 
 
 def import_employee_master(df):
-    init_payroll_database()
     emp_id_col = find_column(df, ["Employee ID", "EmployeeID", "Emp ID", "EmpCode"])
     emp_name_col = find_column(df, ["Employee Name", "Name", "Emp Name"])
     tax_regime_col = find_column(df, ["Tax Regime", "Regime"])
@@ -1907,7 +2032,6 @@ def import_employee_master(df):
 
 
 def import_salary_monthly(df, tax_year, salary_month, mode):
-    init_payroll_database()
     emp_id_col = find_column(df, ["Employee ID", "EmployeeID", "Emp ID", "EmpCode"])
     emp_name_col = find_column(df, ["Employee Name", "Name", "Emp Name"])
     gross_col = find_column(df, ["Gross Salary", "Gross", "Salary", "Annual Salary / CTC", "CTC"])
@@ -1991,7 +2115,6 @@ def import_salary_monthly(df, tax_year, salary_month, mode):
 
 
 def import_tds_monthly(df, tax_year, salary_month, mode):
-    init_payroll_database()
     emp_id_col = find_column(df, ["Employee ID", "EmployeeID", "Emp ID", "EmpCode"])
     emp_name_col = find_column(df, ["Employee Name", "Name", "Emp Name"])
     tds_col = find_column(df, ["TDS", "TDS Deducted", "Tax Deducted"])
@@ -2047,6 +2170,67 @@ def import_tds_monthly(df, tax_year, salary_month, mode):
     return count, ""
 
 
+# ---- Standard month helpers (Indian Financial Year: April → March) ----
+FY_MONTHS = [
+    "April", "May", "June", "July", "August", "September",
+    "October", "November", "December", "January", "February", "March"
+]
+
+
+def current_fy_month_index():
+    """Return the index (0-11) into FY_MONTHS for the current calendar month.
+    April = 0, May = 1, … March = 11."""
+    cal_month = datetime.now().month  # 1=Jan … 12=Dec
+    # Mapping: Apr(4)->0, May(5)->1, ..., Dec(12)->8, Jan(1)->9, Feb(2)->10, Mar(3)->11
+    return (cal_month - 4) % 12
+
+
+def month_selectbox(label, key, default_index=None, help_text=None):
+    """A single reusable dropdown for picking an FY month.
+    Defaults to the current calendar month if no default_index is given."""
+    if default_index is None:
+        default_index = current_fy_month_index()
+    return st.selectbox(
+        label,
+        FY_MONTHS,
+        index=int(default_index),
+        key=key,
+        help=help_text or "Indian Financial Year months (April → March)",
+    )
+
+
+# ---- Excel template builder for upload panels ----
+UPLOAD_TEMPLATES = {
+    "Employee Master": [
+        "Employee ID", "Employee Name", "Tax Regime", "PAN No", "Gender",
+        "Date of Joining", "Date of Exit", "DOB", "Designation"
+    ],
+    "Salary Computation": [
+        "Employee ID", "Employee Name", "Gross Salary", "Basic", "HRA",
+        "Sodexo / Meal Passes", "Telephone / Internet", "Electricity Reimbursement",
+        "Professional / Software", "Skill Development", "Power & Utility Allowance",
+        "Taxable Allowance", "OT / PLI / Profit Sharing", "Ex-Gratia",
+        "Gratuity", "Severance", "Leave Encashment", "Referral Bonus",
+        "Other Adjustment", "Total Income from Salary"
+    ],
+    "TDS Deduction": [
+        "Employee ID", "Employee Name", "TDS Deducted",
+        "Total Tax", "Cess 4%", "Total Tax After Cess",
+        "Total Deduction", "Net Deductible"
+    ],
+}
+
+
+def build_excel_template(columns, sheet_name="Template"):
+    """Return an in-memory .xlsx file containing one empty sheet with headers."""
+    buf = io.BytesIO()
+    df = pd.DataFrame(columns=columns)
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name=sheet_name[:31] or "Template")
+    buf.seek(0)
+    return buf.getvalue()
+
+
 def render_payroll_upload_engine():
     st.markdown("### 📤 Payroll Upload Engine")
     st.caption("Upload Employee Master, Salary Computation Excel, and TDS Excel.")
@@ -2057,17 +2241,29 @@ def render_payroll_upload_engine():
         key="payroll_upload_type"
     )
 
+    # Template download for the chosen upload type
+    template_cols = UPLOAD_TEMPLATES.get(upload_type, [])
+    if template_cols:
+        template_bytes = build_excel_template(template_cols, sheet_name=upload_type)
+        st.download_button(
+            label=f"📥 Download {upload_type} template (.xlsx)",
+            data=template_bytes,
+            file_name=f"koenig_stride_{upload_type.lower().replace(' ', '_')}_template.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            key=f"tpl_dl_{upload_type}"
+        )
+        st.caption(
+            "Expected columns: " + ", ".join(template_cols)
+        )
+
     c1, c2, c3 = st.columns(3)
     with c1:
-        financial_year = st.text_input("Tax Year", value="2026-27")
+        tax_year = st.text_input("Tax Year", value="2026-27", key="payroll_upload_tax_year")
     with c2:
-        salary_month = st.selectbox(
-            "Month",
-            ["April", "May", "June", "July", "August", "September", "October", "November", "December", "January", "February", "March"],
-            index=0
-        )
+        salary_month = month_selectbox("Month", key="payroll_upload_month")
     with c3:
-        mode = st.selectbox("Import Mode", ["Append", "Overwrite Month"])
+        mode = st.selectbox("Import Mode", ["Append", "Overwrite Month"], key="payroll_upload_mode")
 
     uploaded_file = st.file_uploader(
         "Upload Excel file",
@@ -2105,10 +2301,21 @@ def render_payroll_upload_engine():
             st.error(f"Unable to process uploaded file: {e}")
 
 
+def _apply_month_year_filter(df, year_val, month_val):
+    """Filter a payroll df by financial_year and salary_month if user picked a value."""
+    if df.empty:
+        return df
+    out = df.copy()
+    if year_val and year_val != "All" and "financial_year" in out.columns:
+        out = out[out["financial_year"].astype(str) == str(year_val)]
+    if month_val and month_val != "All" and "salary_month" in out.columns:
+        out = out[out["salary_month"].astype(str) == str(month_val)]
+    return out
+
+
 def render_payroll_data_preview():
     st.markdown("### 📊 Payroll Data Preview")
 
-    init_payroll_database()
     conn = get_db_connection()
 
     tab1, tab2, tab3, tab4 = st.tabs(["Employee Master", "Salary Monthly", "TDS Monthly", "Tax Computation"])
@@ -2116,18 +2323,61 @@ def render_payroll_data_preview():
     with tab1:
         df = pd.read_sql_query("SELECT * FROM employee_master ORDER BY employee_id", conn)
         st.dataframe(df, use_container_width=True)
+        if not df.empty:
+            st.caption(f"{len(df)} record(s)")
 
     with tab2:
-        df = pd.read_sql_query("SELECT * FROM employee_salary_monthly ORDER BY uploaded_at DESC, employee_id", conn)
-        st.dataframe(df, use_container_width=True)
+        df = pd.read_sql_query(
+            "SELECT * FROM employee_salary_monthly ORDER BY uploaded_at DESC, employee_id",
+            conn,
+        )
+        if df.empty:
+            st.info("No salary records uploaded yet.")
+        else:
+            years = sorted(df.get("financial_year", pd.Series(dtype=str)).dropna().astype(str).unique().tolist())
+            fc1, fc2 = st.columns(2)
+            with fc1:
+                year_filter = st.selectbox(
+                    "Tax Year", ["All"] + years, index=0, key="prev_salary_year"
+                )
+            with fc2:
+                month_filter = st.selectbox(
+                    "Month", ["All"] + FY_MONTHS, index=0, key="prev_salary_month"
+                )
+            filtered = _apply_month_year_filter(df, year_filter, month_filter)
+            st.dataframe(filtered, use_container_width=True)
+            st.caption(f"{len(filtered)} record(s) of {len(df)} total")
 
     with tab3:
-        df = pd.read_sql_query("SELECT * FROM employee_tds_monthly ORDER BY uploaded_at DESC, employee_id", conn)
-        st.dataframe(df, use_container_width=True)
+        df = pd.read_sql_query(
+            "SELECT * FROM employee_tds_monthly ORDER BY uploaded_at DESC, employee_id",
+            conn,
+        )
+        if df.empty:
+            st.info("No TDS records uploaded yet.")
+        else:
+            years = sorted(df.get("financial_year", pd.Series(dtype=str)).dropna().astype(str).unique().tolist())
+            fc1, fc2 = st.columns(2)
+            with fc1:
+                year_filter = st.selectbox(
+                    "Tax Year", ["All"] + years, index=0, key="prev_tds_year"
+                )
+            with fc2:
+                month_filter = st.selectbox(
+                    "Month", ["All"] + FY_MONTHS, index=0, key="prev_tds_month"
+                )
+            filtered = _apply_month_year_filter(df, year_filter, month_filter)
+            st.dataframe(filtered, use_container_width=True)
+            st.caption(f"{len(filtered)} record(s) of {len(df)} total")
 
     with tab4:
-        df = pd.read_sql_query("SELECT * FROM employee_tax_computation ORDER BY computed_at DESC, employee_id", conn)
+        df = pd.read_sql_query(
+            "SELECT * FROM employee_tax_computation ORDER BY computed_at DESC, employee_id",
+            conn,
+        )
         st.dataframe(df, use_container_width=True)
+        if not df.empty:
+            st.caption(f"{len(df)} record(s)")
 
     conn.close()
 
@@ -2225,6 +2475,10 @@ def ensure_declaration_columns():
         "previous_employer_tds": "REAL DEFAULT 0",
         "eligible_limit": "REAL DEFAULT 0",
         "excess_amount": "REAL DEFAULT 0",
+        # Structured Form 12BB landlord/lender details (JSON-encoded)
+        "form_12bb_details": "TEXT DEFAULT ''",
+        # Structured Form 12B previous-employer details (JSON-encoded)
+        "form_12b_details": "TEXT DEFAULT ''",
     }
     for col, definition in add_cols.items():
         if col not in existing:
@@ -2240,7 +2494,7 @@ def get_declaration_sections():
         "Meal Passes / Sodexo Declaration",
         "Telephone / Internet", "Electricity Reimbursement", "Professional / Software",
         "Skill Development", "Power & Utility Allowance",
-        "Form 12B / 12BB", "Previous Employer Income", "Other Deduction",
+        "Form 12BB", "Form 12B (Previous Employer)", "Other Deduction",
     ]
 
 
@@ -2251,8 +2505,8 @@ def get_section_default_limit(section):
         "LTA": 0, "Donation": 0, "Meal Passes / Sodexo Declaration": 105600,
         "Telephone / Internet": 0, "Electricity Reimbursement": 0,
         "Professional / Software": 0, "Skill Development": 0,
-        "Power & Utility Allowance": 0, "Form 12B / 12BB": 0,
-        "Previous Employer Income": 0, "Other Deduction": 0,
+        "Power & Utility Allowance": 0, "Form 12BB": 0,
+        "Form 12B (Previous Employer)": 0, "Other Deduction": 0,
     }
     try:
         structure_df = load_salary_structure_master()
@@ -2266,23 +2520,76 @@ def get_section_default_limit(section):
     return limits.get(section, 0)
 
 
+# ---- Proof upload security: allowlist + size limit ----
+ALLOWED_PROOF_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".xlsx", ".xls"}
+MAX_PROOF_SIZE_MB = 5
+MAX_PROOF_SIZE_BYTES = MAX_PROOF_SIZE_MB * 1024 * 1024
+
+
 def save_uploaded_proof(uploaded_file, employee_id, section):
+    """Persist an uploaded proof file with extension allowlist + size check.
+
+    Returns the absolute path on success, or an empty string if the upload
+    was rejected. The caller should surface the reason via st.error.
+    """
     if uploaded_file is None:
         return ""
-    safe_section = re.sub(r"[^A-Za-z0-9]+", "_", section).strip("_")
-    ext = Path(uploaded_file.name).suffix
-    file_name = f"{employee_id}_{safe_section}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}{ext}"
+
+    ext = Path(uploaded_file.name).suffix.lower()
+    if ext not in ALLOWED_PROOF_EXTENSIONS:
+        st.error(
+            f"❌ File type {ext or '(unknown)'} is not allowed. "
+            f"Permitted: {', '.join(sorted(ALLOWED_PROOF_EXTENSIONS))}."
+        )
+        return ""
+
+    try:
+        size = uploaded_file.size
+    except Exception:
+        size = len(uploaded_file.getbuffer())
+    if size and size > MAX_PROOF_SIZE_BYTES:
+        st.error(
+            f"❌ File too large ({size/1024/1024:.1f} MB). "
+            f"Max allowed is {MAX_PROOF_SIZE_MB} MB."
+        )
+        return ""
+
+    safe_section = re.sub(r"[^A-Za-z0-9]+", "_", section).strip("_") or "section"
+    safe_emp = re.sub(r"[^A-Za-z0-9]+", "_", str(employee_id)).strip("_") or "emp"
+    file_name = (
+        f"{safe_emp}_{safe_section}_"
+        f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_"
+        f"{uuid.uuid4().hex[:8]}{ext}"
+    )
     file_path = PROOF_FOLDER / file_name
-    with open(file_path, "wb") as f:
-        f.write(uploaded_file.getbuffer())
+    try:
+        with open(file_path, "wb") as f:
+            f.write(uploaded_file.getbuffer())
+    except Exception as e:
+        st.error(f"❌ Could not save proof: {e}")
+        return ""
     return str(file_path)
 
 
-def submit_employee_declaration(employee_id, employee_name, tax_year, tax_regime, declaration_type, section, investment_type, claimed_amount, eligible_limit, proof_file_path, employee_remarks, previous_employer_income=0, previous_employer_tds=0):
+def submit_employee_declaration(
+    employee_id, employee_name, tax_year, tax_regime,
+    declaration_type, section, investment_type,
+    claimed_amount, eligible_limit, proof_file_path, employee_remarks,
+    previous_employer_income=0, previous_employer_tds=0,
+    form_12bb_details=None, form_12b_details=None,
+):
+    """Insert a new declaration row.
+
+    form_12bb_details and form_12b_details are optional dicts that will be
+    JSON-encoded into dedicated columns so the structured form data is
+    preserved alongside the high-level claim."""
+    import json as _json
     ensure_declaration_columns()
     claimed_amount = float(claimed_amount or 0)
     eligible_limit = float(eligible_limit or 0)
     excess_amount = max(claimed_amount - eligible_limit, 0) if eligible_limit > 0 else 0
+    f12bb_json = _json.dumps(form_12bb_details) if form_12bb_details else ""
+    f12b_json = _json.dumps(form_12b_details) if form_12b_details else ""
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("""
@@ -2292,14 +2599,16 @@ def submit_employee_declaration(employee_id, employee_name, tax_year, tax_regime
             claimed_amount, approved_amount, eligible_limit, excess_amount,
             status, proof_file, employee_remarks,
             previous_employer_income, previous_employer_tds,
+            form_12bb_details, form_12b_details,
             submitted_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         employee_id, employee_name, tax_year, tax_regime,
         declaration_type, section, investment_type,
         claimed_amount, 0, eligible_limit, excess_amount,
         "Pending", proof_file_path, employee_remarks,
         float(previous_employer_income or 0), float(previous_employer_tds or 0),
+        f12bb_json, f12b_json,
         datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     ))
     conn.commit()
@@ -2328,6 +2637,14 @@ def update_declaration_status(row_id, status, approved_amount, admin_remarks, ap
     """, (status, float(approved_amount or 0), admin_remarks, approved_by, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), int(row_id)))
     conn.commit()
     conn.close()
+    try:
+        write_audit_log(
+            f"DECLARATION_{status.upper()}",
+            target_id=str(row_id),
+            details=f"approved_amount={approved_amount}; by={approved_by}",
+        )
+    except Exception:
+        pass
 
 
 def delete_declaration(row_id):
@@ -2337,11 +2654,15 @@ def delete_declaration(row_id):
     cur.execute("DELETE FROM employee_investments WHERE id = ?", (int(row_id),))
     conn.commit()
     conn.close()
+    try:
+        write_audit_log("DECLARATION_DELETED", target_id=str(row_id))
+    except Exception:
+        pass
 
 
 def render_employee_declaration_portal():
     st.markdown("### 🧾 Employee Declaration Portal")
-    st.caption("Submit investment proofs, reimbursements, Meal Passes/Sodexo, and Form 12B/12BB.")
+    st.caption("Submit investment proofs, reimbursements, Meal Passes/Sodexo, and Form 12B / 12BB.")
     employee_id = str(st.session_state.employee_id)
     employee_name = str(st.session_state.employee_name or f"Employee {employee_id}")
     c1, c2 = st.columns(2)
@@ -2350,54 +2671,274 @@ def render_employee_declaration_portal():
     with c2:
         tax_regime = st.selectbox("Tax Regime", ["New", "Old"], key="emp_decl_tax_regime")
     st.markdown("---")
-    declaration_type = st.selectbox("Declaration Type", ["Investment", "Reimbursement", "Allowance", "Form 12B / 12BB", "Previous Employer", "Other"], key="emp_decl_type")
+
+    declaration_type = st.selectbox(
+        "Declaration Type",
+        ["Investment", "Reimbursement", "Allowance", "Form 12BB", "Form 12B (Previous Employer)", "Other"],
+        key="emp_decl_type",
+    )
     section = st.selectbox("Section / Component", get_declaration_sections(), key="emp_decl_section")
     eligible_limit = get_section_default_limit(section)
-    c1, c2 = st.columns(2)
-    with c1:
+
+    # ============================================================
+    # FORM 12BB — single consolidated declaration form
+    # (per Rule 26C of Income Tax Rules)
+    # ============================================================
+    form_12bb_details = None
+    form_12b_details = None
+
+    is_12bb = (section == "Form 12BB") or (declaration_type == "Form 12BB")
+    is_12b = (section == "Form 12B (Previous Employer)") or (declaration_type == "Form 12B (Previous Employer)")
+
+    if is_12bb:
+        st.info(
+            "📝 **Form 12BB** — Statement showing particulars of claims by an employee "
+            "for deduction of tax u/s 192. Fill the applicable rows below; leave others as 0."
+        )
+        st.markdown("#### 1. House Rent Allowance (HRA)")
+        hra_c1, hra_c2 = st.columns(2)
+        with hra_c1:
+            hra_rent_paid = st.number_input("Rent Paid (Annual)", min_value=0.0, step=1000.0, key="f12bb_hra_rent")
+            hra_landlord_name = st.text_input("Landlord Name", key="f12bb_hra_ll_name")
+        with hra_c2:
+            hra_landlord_pan = st.text_input("Landlord PAN (mandatory if rent > ₹1,00,000)", key="f12bb_hra_ll_pan")
+            hra_landlord_address = st.text_area("Landlord Address", key="f12bb_hra_ll_addr", height=70)
+
+        st.markdown("#### 2. Leave Travel Concessions / Assistance (LTA)")
+        lta_amount = st.number_input("LTA Claimed", min_value=0.0, step=1000.0, key="f12bb_lta")
+
+        st.markdown("#### 3. Deduction of Interest on Home Loan")
+        hl_c1, hl_c2 = st.columns(2)
+        with hl_c1:
+            hl_interest = st.number_input("Interest Payable / Paid", min_value=0.0, step=1000.0, key="f12bb_hl_int")
+            hl_lender_name = st.text_input("Lender Name", key="f12bb_hl_lender_name")
+        with hl_c2:
+            hl_lender_pan = st.text_input("Lender PAN", key="f12bb_hl_lender_pan")
+            hl_lender_address = st.text_area("Lender Address", key="f12bb_hl_lender_addr", height=70)
+        hl_lender_type = st.selectbox(
+            "Lender Type",
+            ["Financial Institution", "Employer", "Other"],
+            key="f12bb_hl_lender_type",
+        )
+
+        st.markdown("#### 4. Deduction under Chapter VI-A")
+        cv1, cv2, cv3 = st.columns(3)
+        with cv1:
+            sec_80c = st.number_input("Section 80C", min_value=0.0, step=1000.0, key="f12bb_80c")
+            sec_80ccc = st.number_input("Section 80CCC", min_value=0.0, step=1000.0, key="f12bb_80ccc")
+            sec_80ccd = st.number_input("Section 80CCD", min_value=0.0, step=1000.0, key="f12bb_80ccd")
+        with cv2:
+            sec_80d = st.number_input("Section 80D (Medical)", min_value=0.0, step=1000.0, key="f12bb_80d")
+            sec_80e = st.number_input("Section 80E (Education Loan)", min_value=0.0, step=1000.0, key="f12bb_80e")
+            sec_80g = st.number_input("Section 80G (Donations)", min_value=0.0, step=1000.0, key="f12bb_80g")
+        with cv3:
+            sec_80tta = st.number_input("Section 80TTA / 80TTB", min_value=0.0, step=1000.0, key="f12bb_80tta")
+            sec_other_label = st.text_input("Other Section (label)", placeholder="e.g. 80EEA", key="f12bb_other_label")
+            sec_other_amount = st.number_input("Other Section Amount", min_value=0.0, step=1000.0, key="f12bb_other_amt")
+
+        f12bb_total = (
+            hra_rent_paid + lta_amount + hl_interest +
+            sec_80c + sec_80ccc + sec_80ccd +
+            sec_80d + sec_80e + sec_80g + sec_80tta + sec_other_amount
+        )
+        st.success(f"💰 **Total claimed across Form 12BB: ₹{f12bb_total:,.0f}**")
+
+        form_12bb_details = {
+            "hra": {
+                "rent_paid": hra_rent_paid,
+                "landlord_name": hra_landlord_name,
+                "landlord_pan": hra_landlord_pan,
+                "landlord_address": hra_landlord_address,
+            },
+            "lta": lta_amount,
+            "home_loan": {
+                "interest": hl_interest,
+                "lender_name": hl_lender_name,
+                "lender_pan": hl_lender_pan,
+                "lender_address": hl_lender_address,
+                "lender_type": hl_lender_type,
+            },
+            "chapter_via": {
+                "80C": sec_80c, "80CCC": sec_80ccc, "80CCD": sec_80ccd,
+                "80D": sec_80d, "80E": sec_80e, "80G": sec_80g,
+                "80TTA_80TTB": sec_80tta,
+                "other_label": sec_other_label, "other_amount": sec_other_amount,
+            },
+        }
+
+    # ============================================================
+    # FORM 12B — previous employer salary + TDS
+    # ============================================================
+    if is_12b:
+        st.info(
+            "📝 **Form 12B** — Required if you joined Koenig mid-financial-year. "
+            "Submit your previous employer's salary and TDS so payroll deducts correct tax."
+        )
+        pe_c1, pe_c2 = st.columns(2)
+        with pe_c1:
+            pe_employer_name = st.text_input("Previous Employer Name", key="f12b_emp_name")
+            pe_employer_tan = st.text_input("Employer TAN / PAN", key="f12b_emp_tan")
+            pe_employment_from = st.date_input("Employment From", key="f12b_from", value=None)
+        with pe_c2:
+            pe_employer_address = st.text_area("Previous Employer Address", key="f12b_emp_addr", height=70)
+            pe_employment_to = st.date_input("Employment To", key="f12b_to", value=None)
+
+        st.markdown("#### Income from Previous Employer")
+        pi_c1, pi_c2 = st.columns(2)
+        with pi_c1:
+            pe_gross_salary = st.number_input("Gross Salary", min_value=0.0, step=1000.0, key="f12b_gross")
+            pe_hra = st.number_input("HRA Received", min_value=0.0, step=1000.0, key="f12b_hra")
+            pe_lta = st.number_input("LTA Received", min_value=0.0, step=1000.0, key="f12b_lta")
+        with pi_c2:
+            pe_other_allowances = st.number_input("Other Allowances", min_value=0.0, step=1000.0, key="f12b_other_allow")
+            pe_perquisites = st.number_input("Perquisites / Profits in Lieu", min_value=0.0, step=1000.0, key="f12b_perks")
+            pe_pf = st.number_input("Provident Fund Contributed", min_value=0.0, step=1000.0, key="f12b_pf")
+
+        st.markdown("#### Tax Deducted at Source (TDS)")
+        pt_c1, pt_c2 = st.columns(2)
+        with pt_c1:
+            pe_tds = st.number_input("Total TDS Deducted", min_value=0.0, step=1000.0, key="f12b_tds")
+        with pt_c2:
+            pe_prof_tax = st.number_input("Professional Tax Deducted", min_value=0.0, step=1000.0, key="f12b_ptax")
+
+        st.markdown("#### Deductions Already Claimed at Previous Employer")
+        pd_c1, pd_c2 = st.columns(2)
+        with pd_c1:
+            pe_80c = st.number_input("Section 80C", min_value=0.0, step=1000.0, key="f12b_80c")
+            pe_80d = st.number_input("Section 80D", min_value=0.0, step=1000.0, key="f12b_80d")
+        with pd_c2:
+            pe_other_chvia = st.number_input("Other Chapter VI-A", min_value=0.0, step=1000.0, key="f12b_other_chvia")
+            pe_std_ded = st.number_input("Standard Deduction Already Claimed", min_value=0.0, step=1000.0, key="f12b_std")
+
+        form_12b_details = {
+            "employer_name": pe_employer_name,
+            "employer_tan": pe_employer_tan,
+            "employer_address": pe_employer_address,
+            "employment_from": str(pe_employment_from) if pe_employment_from else "",
+            "employment_to": str(pe_employment_to) if pe_employment_to else "",
+            "gross_salary": pe_gross_salary,
+            "hra": pe_hra,
+            "lta": pe_lta,
+            "other_allowances": pe_other_allowances,
+            "perquisites": pe_perquisites,
+            "pf": pe_pf,
+            "tds": pe_tds,
+            "professional_tax": pe_prof_tax,
+            "deductions": {
+                "80C": pe_80c, "80D": pe_80d,
+                "other_chvia": pe_other_chvia,
+                "standard_deduction": pe_std_ded,
+            },
+        }
+
+    # ============================================================
+    # Common claim summary (also acts as the headline row)
+    # ============================================================
+    st.markdown("---")
+    st.markdown("#### Claim Summary")
+    cs1, cs2 = st.columns(2)
+    with cs1:
         investment_type = st.text_input("Investment / Claim Type", value=section, key="emp_decl_inv_type")
-    with c2:
+    with cs2:
         edited_limit = st.number_input("Eligible Limit", value=float(eligible_limit or 0), min_value=0.0, step=1000.0, key="emp_decl_limit")
-    c3, c4 = st.columns(2)
-    with c3:
-        claimed_amount = st.number_input("Claimed Amount", min_value=0.0, step=1000.0, key="emp_decl_claimed_amount")
-    with c4:
+
+    cs3, cs4 = st.columns(2)
+    with cs3:
+        # For 12BB, auto-suggest sum from the form. For 12B, suggest gross_salary.
+        suggested_claim = 0.0
+        if is_12bb and form_12bb_details:
+            suggested_claim = float(
+                form_12bb_details["hra"]["rent_paid"]
+                + form_12bb_details["lta"]
+                + form_12bb_details["home_loan"]["interest"]
+                + sum(v for k, v in form_12bb_details["chapter_via"].items() if isinstance(v, (int, float)))
+            )
+        elif is_12b and form_12b_details:
+            suggested_claim = float(form_12b_details.get("gross_salary", 0))
+        claimed_amount = st.number_input(
+            "Claimed Amount",
+            min_value=0.0,
+            step=1000.0,
+            value=float(suggested_claim or 0),
+            key="emp_decl_claimed_amount",
+        )
+    with cs4:
         if edited_limit > 0 and claimed_amount > edited_limit:
             st.warning(f"Claim exceeds eligible limit by ₹{claimed_amount - edited_limit:,.2f}")
-        else:
+        elif edited_limit > 0:
             st.success("Within configured limit")
-    previous_employer_income = 0.0
-    previous_employer_tds = 0.0
-    if section in ["Form 12B", "Form 12BB", "Previous Employer Income"]: 
-        st.markdown("#### Previous Employer / Form 12B-12BB Details")
-        p1, p2 = st.columns(2)
-        with p1:
-            previous_employer_income = st.number_input("Previous Employer Income", min_value=0.0, step=1000.0, key="previous_employer_income")
-        with p2:
-            previous_employer_tds = st.number_input("Previous Employer TDS", min_value=0.0, step=1000.0, key="previous_employer_tds")
-    uploaded_file = st.file_uploader("Upload Proof / Document", type=["pdf", "jpg", "jpeg", "png", "xlsx", "xls"], key="emp_decl_proof")
-    employee_remarks = st.text_area("Employee Remarks", placeholder="Mention bill period, previous employer name, etc.", key="emp_decl_remarks")
+        else:
+            st.caption("No limit configured for this section.")
+
+    # Legacy fields kept for backward-compatibility with payroll computation
+    previous_employer_income = float(form_12b_details.get("gross_salary", 0)) if form_12b_details else 0.0
+    previous_employer_tds = float(form_12b_details.get("tds", 0)) if form_12b_details else 0.0
+
+    uploaded_file = st.file_uploader(
+        "Upload Proof / Document",
+        type=["pdf", "jpg", "jpeg", "png", "xlsx", "xls"],
+        key="emp_decl_proof",
+    )
+    employee_remarks = st.text_area(
+        "Employee Remarks",
+        placeholder="Mention bill period, previous employer name, etc.",
+        key="emp_decl_remarks",
+    )
     if st.button("📤 Submit Declaration", use_container_width=True):
         proof_path = save_uploaded_proof(uploaded_file, employee_id, section)
-        submit_employee_declaration(employee_id, employee_name, tax_year, tax_regime, declaration_type, section, investment_type, claimed_amount, edited_limit, proof_path, employee_remarks, previous_employer_income, previous_employer_tds)
+        submit_employee_declaration(
+            employee_id, employee_name, tax_year, tax_regime,
+            declaration_type, section, investment_type,
+            claimed_amount, edited_limit, proof_path, employee_remarks,
+            previous_employer_income, previous_employer_tds,
+            form_12bb_details=form_12bb_details,
+            form_12b_details=form_12b_details,
+        )
         st.success("Declaration submitted successfully for approval.")
         st.rerun()
+
     st.markdown("---")
     st.markdown("### My Declaration Status")
     my_df = load_employee_declarations(employee_id)
     if my_df.empty:
         st.info("No declarations submitted yet.")
-    else:
-        show_cols = ["financial_year", "tax_regime", "declaration_type", "section", "investment_type", "claimed_amount", "eligible_limit", "excess_amount", "approved_amount", "status", "employee_remarks", "admin_remarks", "submitted_at", "approved_at"]
-        show_cols = [c for c in show_cols if c in my_df.columns]
-        st.dataframe(my_df[show_cols], use_container_width=True, hide_index=True)
-        approved = pd.to_numeric(my_df.get("approved_amount", 0), errors="coerce").fillna(0).sum()
-        pending = pd.to_numeric(my_df[my_df["status"] == "Pending"].get("claimed_amount", 0), errors="coerce").fillna(0).sum()
-        rejected = pd.to_numeric(my_df[my_df["status"] == "Rejected"].get("claimed_amount", 0), errors="coerce").fillna(0).sum()
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Approved Amount", f"₹{approved:,.0f}")
-        m2.metric("Pending Amount", f"₹{pending:,.0f}")
-        m3.metric("Rejected Amount", f"₹{rejected:,.0f}")
+        return
+
+    show_cols = [
+        "financial_year", "tax_regime", "declaration_type", "section", "investment_type",
+        "claimed_amount", "eligible_limit", "excess_amount", "approved_amount",
+        "status", "employee_remarks", "admin_remarks", "submitted_at", "approved_at",
+    ]
+    show_cols = [c for c in show_cols if c in my_df.columns]
+    st.dataframe(my_df[show_cols], use_container_width=True, hide_index=True)
+
+    # ---- Fixed totals ----
+    # Approved: sum of approved_amount where status == Approved (fall back to
+    # claimed_amount if admin forgot to set approved_amount).
+    # Pending: claimed_amount where status == Pending.
+    # Rejected: claimed_amount where status == Rejected.
+    status_series = my_df.get("status", pd.Series([], dtype=str)).astype(str).str.strip()
+    approved_rows = my_df[status_series.str.lower() == "approved"].copy()
+    pending_rows = my_df[status_series.str.lower() == "pending"].copy()
+    rejected_rows = my_df[status_series.str.lower() == "rejected"].copy()
+
+    def _approved_value(row):
+        amt = float(pd.to_numeric(row.get("approved_amount", 0), errors="coerce") or 0)
+        if amt > 0:
+            return amt
+        # Admin approved but left the field blank — fall back to min(claimed, limit)
+        claimed = float(pd.to_numeric(row.get("claimed_amount", 0), errors="coerce") or 0)
+        limit = float(pd.to_numeric(row.get("eligible_limit", 0), errors="coerce") or 0)
+        return min(claimed, limit) if limit > 0 else claimed
+
+    approved_total = float(approved_rows.apply(_approved_value, axis=1).sum()) if not approved_rows.empty else 0.0
+    pending_total = float(pd.to_numeric(pending_rows.get("claimed_amount", pd.Series(dtype=float)), errors="coerce").fillna(0).sum())
+    rejected_total = float(pd.to_numeric(rejected_rows.get("claimed_amount", pd.Series(dtype=float)), errors="coerce").fillna(0).sum())
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Approved Amount", f"₹{approved_total:,.0f}", f"{len(approved_rows)} approved")
+    m2.metric("Pending Amount", f"₹{pending_total:,.0f}", f"{len(pending_rows)} pending")
+    m3.metric("Rejected Amount", f"₹{rejected_total:,.0f}", f"{len(rejected_rows)} rejected")
 
 
 
@@ -2562,90 +3103,29 @@ def render_admin_declaration_approval_panel():
     )
 
     st.info(
-        "Change Status from the dropdown. Use Approved / Rejected / Delete. "
-        "Then click Submit Updates below."
+        "Change Status from the dropdown (Approved / Rejected / Delete). "
+        "Approved Amount is auto-filled if you leave it blank — you can override it. "
+        "Click **Submit Updates** below to save."
     )
 
     if st.button(
         "✅ Submit Updates",
         use_container_width=True,
-        key="submit_declaration_approval_updates_btn_1"
-    ):
-
-        updated_count = 0
-        deleted_count = 0
-
-        for _, row in edited_df.iterrows():
-
-            row_id = int(row["id"])
-
-            status = str(
-                row.get("status", "Pending")
-            )
-
-            approved_amount = float(
-                row.get("approved_amount", 0) or 0
-            )
-
-            admin_remarks = str(
-                row.get("admin_remarks", "") or ""
-            )
-
-            if status == "Delete":
-
-                delete_declaration(row_id)
-                deleted_count += 1
-
-            else:
-
-                update_declaration_status(
-                    row_id,
-                    status,
-                    approved_amount,
-                    admin_remarks,
-                    st.session_state.employee_name or "Admin"
-                )
-
-                updated_count += 1
-
-        st.success(
-            f"Declaration approvals updated. "
-            f"Updated: {updated_count}, Deleted: {deleted_count}"
-        )
-
-        st.rerun()
-        st.info("Use the Status dropdown inside the table. Then click Submit Updates.")
-    
-    def get_declaration_sections():
-
-        return [
-            "80C",
-            "80D",
-            "NPS 80CCD(1B)",
-            "Employer NPS 80CCD(2)",
-            "HRA",
-            "Home Loan Interest",
-            "LTA",
-            "Donation",
-            "Meal Passes / Sodexo Declaration",
-            "Telephone / Internet",
-            "Electricity Reimbursement",
-            "Professional / Software",
-            "Skill Development",
-            "Power & Utility Allowance",
-            "Form 12B",
-            "Form 12BB",
-            "Previous Employer Income",
-            "Other Deduction"
-        ]
-
-    if st.button(
-        "✅ Submit Updates",
-        use_container_width=True,
-        key="submit_declaration_approval_updates_btn_2"
+        key="submit_declaration_approval_updates",
+        type="primary",
     ):
         updated_count = 0
         deleted_count = 0
+        skipped_count = 0
+
+        # Build a lookup so we can read claimed_amount / eligible_limit from the original df
+        meta_map = {
+            int(r["id"]): {
+                "claimed": float(r.get("claimed_amount", 0) or 0),
+                "limit": float(r.get("eligible_limit", 0) or 0),
+            }
+            for _, r in filtered.iterrows()
+        }
 
         for _, row in edited_df.iterrows():
             row_id = int(row["id"])
@@ -2658,46 +3138,53 @@ def render_admin_declaration_approval_panel():
             old_remarks = str(original_remarks_map.get(row_id, "") or "")
 
             changed = (
-                new_status != old_status or
-                new_approved_amount != old_approved or
-                new_admin_remarks != old_remarks
+                new_status != old_status
+                or new_approved_amount != old_approved
+                or new_admin_remarks != old_remarks
             )
-
             if not changed:
+                skipped_count += 1
                 continue
 
             if new_status == "Delete":
                 delete_declaration(row_id)
                 deleted_count += 1
-            elif new_status == "Rejected":
-                update_declaration_status(
-                    row_id,
-                    "Rejected",
-                    0,
-                    new_admin_remarks,
-                    st.session_state.employee_name or "Admin"
-                )
-                updated_count += 1
-            elif new_status == "Approved":
-                update_declaration_status(
-                    row_id,
-                    "Approved",
-                    new_approved_amount,
-                    new_admin_remarks,
-                    st.session_state.employee_name or "Admin"
-                )
-                updated_count += 1
-            else:
-                update_declaration_status(
-                    row_id,
-                    "Pending",
-                    new_approved_amount,
-                    new_admin_remarks,
-                    st.session_state.employee_name or "Admin"
-                )
-                updated_count += 1
+                continue
 
-        st.success(f"Updates submitted. Updated: {updated_count}, Deleted: {deleted_count}")
+            if new_status == "Rejected":
+                update_declaration_status(
+                    row_id, "Rejected", 0, new_admin_remarks,
+                    st.session_state.employee_name or "Admin",
+                )
+                updated_count += 1
+                continue
+
+            if new_status == "Approved":
+                # Auto-populate approved_amount if admin left it blank/zero.
+                # Use min(claimed, eligible_limit) when a limit is set, else claimed.
+                if new_approved_amount <= 0:
+                    meta = meta_map.get(row_id, {})
+                    claimed = meta.get("claimed", 0)
+                    limit = meta.get("limit", 0)
+                    new_approved_amount = min(claimed, limit) if limit > 0 else claimed
+                update_declaration_status(
+                    row_id, "Approved", new_approved_amount, new_admin_remarks,
+                    st.session_state.employee_name or "Admin",
+                )
+                updated_count += 1
+                continue
+
+            # Pending (default)
+            update_declaration_status(
+                row_id, "Pending", new_approved_amount, new_admin_remarks,
+                st.session_state.employee_name or "Admin",
+            )
+            updated_count += 1
+
+        st.success(
+            f"✅ Updates submitted — "
+            f"Updated: {updated_count}, Deleted: {deleted_count}, Unchanged: {skipped_count}"
+        )
         st.rerun()
 
     st.markdown("---")
@@ -2723,6 +3210,76 @@ def render_admin_declaration_approval_panel():
         )
 
         render_inline_proof_viewer(selected_proof_row.get("proof_file", ""))
+
+    # ----- Step 3: Form 12B / 12BB structured viewer -----
+    import json as _json
+    form_rows = filtered.copy()
+    if "form_12bb_details" in form_rows.columns or "form_12b_details" in form_rows.columns:
+        f12bb = form_rows[form_rows.get("form_12bb_details", "").astype(str).str.strip() != ""] if "form_12bb_details" in form_rows.columns else pd.DataFrame()
+        f12b = form_rows[form_rows.get("form_12b_details", "").astype(str).str.strip() != ""] if "form_12b_details" in form_rows.columns else pd.DataFrame()
+
+        if not f12bb.empty or not f12b.empty:
+            st.markdown("---")
+            st.markdown("#### Step 3: Structured Form 12B / 12BB Data")
+
+            if not f12bb.empty:
+                with st.expander(f"📄 Form 12BB submissions ({len(f12bb)})", expanded=False):
+                    for _, r in f12bb.iterrows():
+                        try:
+                            details = _json.loads(r["form_12bb_details"])
+                        except Exception:
+                            continue
+                        st.markdown(
+                            f"**Employee {r['employee_id']} — {r['employee_name']}** | "
+                            f"Submitted: {r.get('submitted_at', '')}"
+                        )
+                        cv1, cv2 = st.columns(2)
+                        with cv1:
+                            st.markdown("**HRA**")
+                            st.json(details.get("hra", {}))
+                            st.markdown(f"**LTA:** ₹{details.get('lta', 0):,.0f}")
+                        with cv2:
+                            st.markdown("**Home Loan**")
+                            st.json(details.get("home_loan", {}))
+                        st.markdown("**Chapter VI-A**")
+                        st.json(details.get("chapter_via", {}))
+                        st.markdown("---")
+
+            if not f12b.empty:
+                with st.expander(f"📄 Form 12B (Previous Employer) submissions ({len(f12b)})", expanded=False):
+                    for _, r in f12b.iterrows():
+                        try:
+                            details = _json.loads(r["form_12b_details"])
+                        except Exception:
+                            continue
+                        st.markdown(
+                            f"**Employee {r['employee_id']} — {r['employee_name']}** | "
+                            f"Submitted: {r.get('submitted_at', '')}"
+                        )
+                        st.markdown(
+                            f"**Previous Employer:** {details.get('employer_name','')}  \n"
+                            f"**TAN/PAN:** {details.get('employer_tan','')}  \n"
+                            f"**Period:** {details.get('employment_from','')} → {details.get('employment_to','')}"
+                        )
+                        b1, b2 = st.columns(2)
+                        with b1:
+                            st.markdown("**Income**")
+                            st.write({
+                                "Gross Salary": details.get("gross_salary", 0),
+                                "HRA": details.get("hra", 0),
+                                "LTA": details.get("lta", 0),
+                                "Other Allowances": details.get("other_allowances", 0),
+                                "Perquisites": details.get("perquisites", 0),
+                                "PF": details.get("pf", 0),
+                            })
+                        with b2:
+                            st.markdown("**Tax & Deductions**")
+                            st.write({
+                                "TDS Deducted": details.get("tds", 0),
+                                "Professional Tax": details.get("professional_tax", 0),
+                                **{f"Ded: {k}": v for k, v in details.get("deductions", {}).items()},
+                            })
+                        st.markdown("---")
 
     st.markdown("---")
     csv = filtered.to_csv(index=False).encode("utf-8")
@@ -2977,10 +3534,10 @@ def delete_employee_master_record(employee_id):
 
 def render_employee_master_upload_panel():
     st.markdown("## 👥 Employee Master Upload")
-    st.caption("Upload or update employees for Koenig Strides payroll and tax computation.")
+    st.caption("Upload or update employees for Koenig Stride payroll and tax computation.")
     c1, c2 = st.columns(2)
     with c1:
-        upload_month = st.text_input("Upload Month", value=datetime.now().strftime("%B %Y"), key="emp_master_upload_month")
+        upload_month = month_selectbox("Upload Month", key="emp_master_upload_month")
     with c2:
         tax_year = st.text_input("Tax Year", value="2026-27", key="emp_master_tax_year")
 
@@ -2992,7 +3549,24 @@ def render_employee_master_upload_panel():
             "TaxRegime": "New", "AnnualSalary": 1200000, "MonthlySalary": 100000, "BasicPercent": 40, "Status": "Active"
         }])
         st.dataframe(sample_df, use_container_width=True, hide_index=True)
-        st.download_button("⬇️ Download Sample Employee Master CSV", sample_df.to_csv(index=False).encode("utf-8"), file_name="employee_master_sample.csv", mime="text/csv", use_container_width=True)
+        dl_c1, dl_c2 = st.columns(2)
+        with dl_c1:
+            st.download_button(
+                "⬇️ Download Sample CSV",
+                sample_df.to_csv(index=False).encode("utf-8"),
+                file_name="employee_master_sample.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+        with dl_c2:
+            tpl_bytes = build_excel_template(list(sample_df.columns), sheet_name="Employee Master")
+            st.download_button(
+                "⬇️ Download Empty Template (.xlsx)",
+                tpl_bytes,
+                file_name="employee_master_template.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
 
     uploaded_file = st.file_uploader("Upload Employee Master Excel", type=["xlsx", "xls"], key="employee_master_excel_upload")
     if uploaded_file is not None:
@@ -3060,7 +3634,13 @@ def transcribe_audio_with_openai(audio_bytes):
 
         transcript = client.audio.transcriptions.create(
             model="whisper-1",
-            file=audio_file
+            file=audio_file,
+            language="en",
+            prompt=(
+                "Indian English speaker. Common terms: HRA, NPS, Section 80C, "
+                "Form 16, Form 12B, Form 12BB, Sodexo, Koenig, Stride, Sarika, "
+                "SPOC, TDS, PAN, CTC, Rupees, lakh, crore."
+            ),
         )
 
         return transcript.text, ""
@@ -3141,6 +3721,177 @@ def render_voice_sarika_panel():
 
 
 # =====================================================
+# ADMIN ANALYTICS DASHBOARD
+# =====================================================
+
+def render_admin_analytics_dashboard():
+    """High-level admin analytics: users, declarations, knowledge, payroll."""
+    st.markdown("## 📈 Admin Analytics")
+    st.caption("Overview of platform usage, declarations, and data health.")
+
+    # ---------------- Users ----------------
+    try:
+        users_df = load_users()
+        total_users = len(users_df)
+        admins = int((users_df["role"].astype(str).str.lower() == "admin").sum())
+        employees = int((users_df["role"].astype(str).str.lower() == "employee").sum())
+        active_users = int(users_df["active"].astype(str).str.lower().isin(["true", "1", "yes", "y"]).sum())
+    except Exception:
+        total_users = admins = employees = active_users = 0
+
+    st.markdown("### 👥 Users")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total Users", total_users)
+    c2.metric("Active", active_users)
+    c3.metric("Employees", employees)
+    c4.metric("Admins", admins)
+
+    # ---------------- Declarations ----------------
+    st.markdown("### 🧾 Declarations")
+    try:
+        decl_df = load_employee_declarations()
+    except Exception:
+        decl_df = pd.DataFrame()
+
+    if decl_df.empty:
+        st.info("No declarations submitted yet.")
+    else:
+        total_decl = len(decl_df)
+        pending = int((decl_df["status"].astype(str) == "Pending").sum())
+        approved = int((decl_df["status"].astype(str) == "Approved").sum())
+        rejected = int((decl_df["status"].astype(str) == "Rejected").sum())
+
+        d1, d2, d3, d4 = st.columns(4)
+        d1.metric("Total Declarations", total_decl)
+        d2.metric("Pending", pending)
+        d3.metric("Approved", approved)
+        d4.metric("Rejected", rejected)
+
+        try:
+            claimed_total = float(decl_df.get("claimed_amount", pd.Series(dtype=float)).sum() or 0)
+            approved_total = float(decl_df[decl_df["status"].astype(str) == "Approved"]
+                                   .get("approved_amount", pd.Series(dtype=float)).sum() or 0)
+            a1, a2 = st.columns(2)
+            a1.metric("Total Claimed", f"₹{claimed_total:,.0f}")
+            a2.metric("Total Approved", f"₹{approved_total:,.0f}")
+        except Exception:
+            pass
+
+        # Declarations by section
+        if "section" in decl_df.columns:
+            with st.expander("📊 Declarations by Section", expanded=False):
+                by_section = (
+                    decl_df.groupby("section")
+                    .agg(
+                        count=("id", "count"),
+                        claimed=("claimed_amount", "sum"),
+                    )
+                    .reset_index()
+                    .sort_values("count", ascending=False)
+                )
+                st.dataframe(by_section, use_container_width=True, hide_index=True)
+                try:
+                    st.bar_chart(by_section.set_index("section")["count"])
+                except Exception:
+                    pass
+
+        # Top employees by declaration count
+        if "employee_id" in decl_df.columns:
+            with st.expander("👤 Top Employees by Declarations", expanded=False):
+                top_emp = (
+                    decl_df.groupby(["employee_id", "employee_name"])
+                    .size()
+                    .reset_index(name="declarations")
+                    .sort_values("declarations", ascending=False)
+                    .head(10)
+                )
+                st.dataframe(top_emp, use_container_width=True, hide_index=True)
+
+    # ---------------- Knowledge base ----------------
+    st.markdown("### 📚 Knowledge Base")
+    try:
+        kb_total = len(faq_df) if not faq_df.empty else 0
+        kb_protected = int(faq_df["Protected"].astype(str).str.lower().isin(["yes", "y", "true"]).sum()) if not faq_df.empty and "Protected" in faq_df.columns else 0
+        spoc_total = len(spoc_df) if not spoc_df.empty else 0
+    except Exception:
+        kb_total = kb_protected = spoc_total = 0
+
+    k1, k2, k3 = st.columns(3)
+    k1.metric("FAQ Records", kb_total)
+    k2.metric("Protected Records", kb_protected)
+    k3.metric("SPOC Master Rows", spoc_total)
+
+    if not faq_df.empty and "Main Module" in faq_df.columns:
+        with st.expander("📊 FAQs by Module", expanded=False):
+            module_counts = faq_df["Main Module"].value_counts().reset_index()
+            module_counts.columns = ["Module", "Count"]
+            st.dataframe(module_counts, use_container_width=True, hide_index=True)
+            try:
+                st.bar_chart(module_counts.set_index("Module"))
+            except Exception:
+                pass
+
+    # ---------------- Payroll ----------------
+    st.markdown("### 💼 Payroll Database")
+    try:
+        conn = get_db_connection()
+        emp_master_n = conn.execute("SELECT COUNT(*) FROM employee_master").fetchone()[0]
+        salary_n = conn.execute("SELECT COUNT(*) FROM employee_salary_monthly").fetchone()[0]
+        tds_n = conn.execute("SELECT COUNT(*) FROM employee_tds_monthly").fetchone()[0]
+        inv_n = conn.execute("SELECT COUNT(*) FROM employee_investments").fetchone()[0]
+        conn.close()
+    except Exception:
+        emp_master_n = salary_n = tds_n = inv_n = 0
+
+    p1, p2, p3, p4 = st.columns(4)
+    p1.metric("Employee Master", emp_master_n)
+    p2.metric("Salary Records", salary_n)
+    p3.metric("TDS Records", tds_n)
+    p4.metric("Investment Rows", inv_n)
+
+    # ---------------- Storage health (Streamlit Cloud warning) ----------------
+    st.markdown("### ⚠️ Storage Health")
+    try:
+        db_size = DB_PATH.stat().st_size / 1024 if DB_PATH.exists() else 0
+        proof_count = sum(1 for _ in PROOF_FOLDER.glob("*")) if PROOF_FOLDER.exists() else 0
+    except Exception:
+        db_size = 0
+        proof_count = 0
+    s1, s2 = st.columns(2)
+    s1.metric("SQLite DB size", f"{db_size:,.1f} KB")
+    s2.metric("Proof files stored", proof_count)
+    st.warning(
+        "⚠️ **Streamlit Cloud filesystem is ephemeral.** SQLite data and proof "
+        "uploads will be wiped on container restart. Plan a Postgres + S3 migration "
+        "before going live with real employees."
+    )
+
+    # ---------------- Audit log ----------------
+    st.markdown("### 🔍 Recent Audit Log (last 100)")
+    try:
+        conn = get_db_connection()
+        audit_df = pd.read_sql_query(
+            "SELECT timestamp, actor_id, actor_role, action, target_id, details "
+            "FROM audit_log ORDER BY id DESC LIMIT 100",
+            conn,
+        )
+        conn.close()
+        if audit_df.empty:
+            st.info("No audit events recorded yet.")
+        else:
+            st.dataframe(audit_df, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Download full audit log (.csv)",
+                audit_df.to_csv(index=False).encode("utf-8"),
+                file_name="koenig_stride_audit_log.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+    except Exception as e:
+        st.caption(f"Audit log not available: {e}")
+
+
+# =====================================================
 # PANEL NAVIGATION
 # =====================================================
 
@@ -3171,7 +3922,7 @@ with top2:
     st.markdown("""
     <div class='brand-row'>
         <div class='bot-icon'>☻</div>
-        <h1 class='brand-title'>Koenig Strides</h1>
+        <h1 class='brand-title'>Koenig Stride</h1>
     </div>
     <div class='brand-subtitle'>Tax & Entity Nexus Assistant — Step Forward</div>
     """, unsafe_allow_html=True)
@@ -3238,6 +3989,8 @@ with right:
     ]
 
     if selected_panel in locked_panels and not st.session_state.get("start_completed", False):
+        # Silent redirect was confusing for users — explain what happened.
+        st.info("👋 Please click **🚀 Start Here** first to unlock this panel.")
         selected_panel = "Home"
         st.session_state.selected_panel = "Home"
 
@@ -3246,11 +3999,15 @@ with right:
     # =====================================================
     if selected_panel == "Home":
         st.markdown("""
-        <div class='hero' style='margin-top:80px;'>
-            <h2>Welcome to Koenig Strides</h2>
+        <div class='hero' style='margin-top:24px;'>
+            <h2>Welcome to Koenig Stride</h2>
             <p>Select a panel from the left sidebar,<br>or use Ask Sarika to ask directly.</p>
         </div>
         """, unsafe_allow_html=True)
+        st.info(
+            "👉 Click **🚀 Start Here** in the left sidebar to unlock Ask Sarika, "
+            "Employee Declarations, and (for Admins) the Payroll & Approval panels."
+        )
 
 
     # =====================================================
@@ -3355,44 +4112,68 @@ with right:
     # =====================================================
     elif selected_panel == "Ask Sarika":
         st.markdown("## 💬 Ask Sarika")
+        st.markdown(
+            "<div style='color:#64748b; font-size:13px; margin-top:-8px; margin-bottom:12px;'>"
+            "Chat with Sarika — your AI assistant for tax, salary, labour code, entity nexus and SPOC queries."
+            "</div>",
+            unsafe_allow_html=True
+        )
 
-        with st.expander("🎙️ Voice Sarika", expanded=False):
+        with st.expander("🎙️ Voice Sarika (speak instead of typing)", expanded=False):
             if "render_voice_sarika_panel" in globals():
                 render_voice_sarika_panel()
             else:
                 st.info("Voice Sarika is not available in this build. Please use the text box below.")
 
-        st.markdown("### Ask by typing")
-        with st.form("ask_form", clear_on_submit=True):
-            query = st.text_input("Type your question here", placeholder="Example: What is NPS?")
-            submitted = st.form_submit_button("➤ Ask Sarika")
+        # ----- Chat history (newest at the bottom, like real chat apps) -----
+        chat_container = st.container()
+        with chat_container:
+            if not st.session_state.chat_history:
+                with st.chat_message("assistant", avatar="👩‍💼"):
+                    st.markdown(
+                        f"Hi **{st.session_state.employee_name}** 👋  \n"
+                        "I'm **Sarika**, your Koenig Stride assistant. "
+                        "Ask me anything about **Tax, Salary, Labour Code, Entity Nexus** or **SPOC routing**."
+                    )
+            else:
+                for item in st.session_state.chat_history[-30:]:
+                    with st.chat_message("user", avatar="👤"):
+                        st.markdown(item["query"])
 
-        if submitted and query.strip():
-            with st.spinner("Sarika is thinking..."):
-                submit_query(query.strip())
+                    with st.chat_message("assistant", avatar="👩‍💼"):
+                        if item["type"] == "protected":
+                            email_html = f"<br><b>Email:</b> {item.get('email','')}" if item.get("email") else ""
+                            st.markdown(f"""
+                            <div class='protected-box' style='margin:0;'>
+                            <b>🔒 Protected Information</b><br>
+                            {item['answer']}<br><br>
+                            Please contact:<br>
+                            <b>SPOC:</b> {item.get('spoc','Relevant SPOC')}
+                            {email_html}
+                            </div>
+                            """, unsafe_allow_html=True)
+                        else:
+                            st.markdown(item["answer"])
+
+                        if st.session_state.role == "Admin":
+                            st.caption(
+                                f"Source: {item.get('source','')} · "
+                                f"Similarity: {item.get('similarity',0):.2f}"
+                            )
+
+        # ----- Chat input at the bottom (widget-style, like ChatGPT/WhatsApp) -----
+        user_query = st.chat_input("Type your question and press Enter… (e.g. What is NPS?)")
+        if user_query and user_query.strip():
+            with st.spinner("Sarika is thinking…"):
+                submit_query(user_query.strip())
+            st.rerun()
 
         if st.session_state.chat_history:
-            st.markdown("<div class='card'>", unsafe_allow_html=True)
-            st.markdown("### Conversation")
-            for item in reversed(st.session_state.chat_history[-10:]):
-                st.markdown(f"<div class='user-bubble'><b>You:</b><br>{item['query']}</div>", unsafe_allow_html=True)
-
-                if item["type"] == "protected":
-                    email_html = f"<br><b>Email:</b> {item.get('email','')}" if item.get("email") else ""
-                    st.markdown(f"""
-                    <div class='protected-box'>
-                    <b>🔒 Sarika:</b><br>
-                    {item['answer']}<br><br>
-                    Please contact:<br>
-                    <b>SPOC:</b> {item.get('spoc','Relevant SPOC')}
-                    {email_html}<br><br>
-                    <span class='small-text'>Source: {item.get('source','')} | Similarity: {item.get('similarity',0):.2f}</span>
-                    </div>
-                    """, unsafe_allow_html=True)
-                else:
-                    meta = f"<br><br><span class='small-text'>Source: {item.get('source','')} | Similarity: {item.get('similarity',0):.2f}</span>" if st.session_state.role == "Admin" else ""
-                    st.markdown(f"<div class='bot-bubble'><b>Sarika:</b><br>{item['answer']}{meta}</div>", unsafe_allow_html=True)
-            st.markdown("</div>", unsafe_allow_html=True)
+            col_clear, _ = st.columns([1, 4])
+            with col_clear:
+                if st.button("🗑️ Clear chat", use_container_width=True, key="ask_sarika_clear"):
+                    st.session_state.chat_history = []
+                    st.rerun()
 
     # =====================================================
     # ADMIN PANELS
@@ -3434,10 +4215,7 @@ with right:
             st.warning("No knowledge records loaded.")
 
     elif selected_panel == "Admin Analytics" and st.session_state.role == "Admin":
-        if "render_admin_analytics_dashboard" in globals():
-            render_admin_analytics_dashboard()
-        else:
-            st.info("Admin Analytics function not found in this build.")
+        render_admin_analytics_dashboard()
 
     else:
         st.warning("You are not authorized to view this panel.")
