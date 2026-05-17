@@ -2566,7 +2566,11 @@ def render_admin_declaration_approval_panel():
         "Then click Submit Updates below."
     )
 
-    if st.button("✅ Submit Updates", use_container_width=True):
+    if st.button(
+        key="submit_declaration_approval_updates_btn_1"
+        use_container_width=True,
+        key="submit_declaration_approval_updates_btn"
+    ):
 
         updated_count = 0
         deleted_count = 0
@@ -2635,7 +2639,7 @@ def render_admin_declaration_approval_panel():
             "Other Deduction"
         ]
 
-    if st.button("✅ Submit Updates", use_container_width=True):
+    if st.button(key="submit_declaration_approval_updates_btn_2", use_container_width=True):
         updated_count = 0
         deleted_count = 0
 
