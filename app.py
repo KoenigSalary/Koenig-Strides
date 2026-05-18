@@ -21,12 +21,12 @@ except Exception:
     AI_AVAILABLE = False
 
 # =====================================================
-# KOENIG STRIDES - POLISHED LOGIN UI + RESPONSIVE
+# KOENIG STRIDE - POLISHED LOGIN UI + RESPONSIVE
 # Streamlit-native layout, no broken HTML wrappers
 # =====================================================
 
 st.set_page_config(
-    page_title="Koenig Strides",
+    page_title="Koenig Stride",
     page_icon="🤖",
     layout="wide",
     initial_sidebar_state="collapsed"
@@ -35,9 +35,9 @@ st.set_page_config(
 BASE_DIR = Path(__file__).parent
 EXCEL_PATH = BASE_DIR / "knowledge" / "Koenig_VoiceBot_FAQ_Master.xlsx"
 LOGO_PATH = BASE_DIR / "assets" / "koenig_logo.png"
-STRIDES_PATH = BASE_DIR / "assets" / "strides.png"
+SARIKA_PATH = BASE_DIR / "assets" / "sarika.png"
 USERS_PATH = BASE_DIR / "users.csv"
-DB_PATH = BASE_DIR / "koenig_Strides.db"
+DB_PATH = BASE_DIR / "koenig_stride.db"
 PROOF_FOLDER = BASE_DIR / "proof_uploads"
 PROOF_FOLDER.mkdir(exist_ok=True)
 
@@ -70,7 +70,7 @@ def image_to_base64(path):
     return ""
 
 LOGO_B64 = image_to_base64(LOGO_PATH)
-STRIDES_B64 = image_to_base64(STRIDES_PATH)
+SARIKA_B64 = image_to_base64(SARIKA_PATH)
 
 def img_html(b64, css_class="", style=""):
     if not b64:
@@ -890,24 +890,24 @@ def login_screen():
         opacity: 0.95;
         line-height: 1.4;
     }
-    .strides-wrap {
+    .sarika-wrap {
         text-align: center;
         margin: 4px auto 10px auto;
     }
-    .strides-wrap img {
+    .sarika-wrap img {
         width: 78px; height: 78px;
         border-radius: 50%;
         object-fit: cover;
         border: 3px solid #1471d8;
         box-shadow: 0 6px 16px rgba(15,23,42,.18);
     }
-    .strides-caption {
+    .sarika-caption {
         margin-top: 4px;
         font-weight: 800;
         color: #0b3ba7;
         font-size: 13px;
     }
-    .strides-online {
+    .sarika-online {
         color: #15803d;
         font-weight: 700;
         font-size: 11px;
@@ -964,7 +964,7 @@ def login_screen():
         .login-hero-card h2 { font-size: 16px; }
         .login-form-card { padding: 16px 14px; }
         .login-logo-wrap img { width: 140px; }
-        .strides-wrap img { width: 68px; height: 68px; }
+        .sarika-wrap img { width: 68px; height: 68px; }
     }
     </style>
     <div class='login-page-bg'></div>
@@ -983,12 +983,12 @@ def login_screen():
         else:
             st.markdown("<div class='login-logo-wrap'><h2 style='color:#04123d;'>KOENIG</h2></div>", unsafe_allow_html=True)
 
-        # 2. Koenig Strides title (under logo, brand-colored)
+        # 2. Koenig Stride title (under logo, brand-colored)
         st.markdown("""
         <div class='login-stack'>
             <div class='login-title-row'>
                 <div class='login-title-icon'>☻</div>
-                <h1 class='login-title-text'>Koenig Strides</h1>
+                <h1 class='login-title-text'>Koenig Stride</h1>
             </div>
             <div class='login-subtitle'>Tax &amp; Entity Nexus Assistant — Step Forward</div>
         </div>
@@ -997,7 +997,7 @@ def login_screen():
         # 3. Welcome hero (under title)
         st.markdown("""
         <div class='login-hero-card'>
-            <h2>Welcome to Koenig Strides</h2>
+            <h2>Welcome to Koenig Stride</h2>
             <p>Your secure internal assistant for tax, salary, entity and SPOC guidance.</p>
         </div>
         """, unsafe_allow_html=True)
@@ -1075,7 +1075,7 @@ def force_password_change_screen():
     with c2:
         st.markdown("<div class='card'>", unsafe_allow_html=True)
         st.markdown("## 🔐 Change Password Required")
-        st.info("For security, please change your default password before using Koenig Strides.")
+        st.info("For security, please change your default password before using Koenig Stride.")
         new_password = st.text_input("New Password", type="password")
         confirm_password = st.text_input("Confirm New Password", type="password")
         if st.button("Update Password", use_container_width=True):
@@ -1319,7 +1319,7 @@ def render_answer(row):
         email_html = f"<br><b>Email:</b> {email}" if email else ""
         st.markdown(f"<div class='protected-box'><b>🔒 Protected Information</b><br>This information is protected and cannot be displayed here.<br><br>Please contact the designated SPOC:<br><b>SPOC:</b> {spoc}{email_html}</div>", unsafe_allow_html=True)
     else:
-        st.markdown(f"<div class='answer-box'><b>Koenig Strides Answer:</b><br>{get_answer_text(row)}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='answer-box'><b>Koenig Stride Answer:</b><br>{get_answer_text(row)}</div>", unsafe_allow_html=True)
 
 # =====================================================
 # SEARCH
@@ -1404,7 +1404,7 @@ SPOC: {safe_get(row, 'SPOC Name')}
 Email: {safe_get(row, 'SPOC Email')}
 """
     prompt = f"""
-You are Koenig Strides, an internal Tax & Entity Nexus Assistant.
+You are Koenig Stride, an internal Tax & Entity Nexus Assistant.
 Use only the knowledge base below. Do not invent facts. If Protected is YES, do not reveal protected information and route employee to SPOC.
 
 Knowledge Base:
@@ -1456,7 +1456,10 @@ def add_column_if_missing(cur, table_name, column_name, column_definition):
         cur.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}")
 
 
-@st.cache_resource(show_spinner=False)
+# Note: do NOT cache init_payroll_database with @st.cache_resource. On Streamlit
+# Cloud the filesystem is ephemeral — the DB file can be wiped between runs while
+# the in-memory cache survives, causing "no such table" errors. Instead, the
+# function is cheap (uses CREATE TABLE IF NOT EXISTS) and safe to call often.
 def init_payroll_database():
     conn = get_db_connection()
     cur = conn.cursor()
@@ -1730,8 +1733,20 @@ def text_value(row, col):
 
 
 def load_salary_structure_master():
+    init_payroll_database()  # ensure table exists (no-op if already created)
     conn = get_db_connection()
-    df = pd.read_sql_query("SELECT * FROM salary_structure_master ORDER BY sort_order, id", conn)
+    try:
+        df = pd.read_sql_query(
+            "SELECT * FROM salary_structure_master ORDER BY sort_order, id", conn
+        )
+    except Exception:
+        # Table missing or schema mismatch — force a fresh init and retry once
+        conn.close()
+        init_payroll_database()
+        conn = get_db_connection()
+        df = pd.read_sql_query(
+            "SELECT * FROM salary_structure_master ORDER BY sort_order, id", conn
+        )
     conn.close()
     return df
 
@@ -2248,7 +2263,7 @@ def render_payroll_upload_engine():
         st.download_button(
             label=f"📥 Download {upload_type} template (.xlsx)",
             data=template_bytes,
-            file_name=f"koenig_strides_{upload_type.lower().replace(' ', '_')}_template.xlsx",
+            file_name=f"koenig_stride_{upload_type.lower().replace(' ', '_')}_template.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
             key=f"tpl_dl_{upload_type}"
@@ -2316,6 +2331,7 @@ def _apply_month_year_filter(df, year_val, month_val):
 def render_payroll_data_preview():
     st.markdown("### 📊 Payroll Data Preview")
 
+    init_payroll_database()  # ensure tables exist (no-op if already created)
     conn = get_db_connection()
 
     tab1, tab2, tab3, tab4 = st.tabs(["Employee Master", "Salary Monthly", "TDS Monthly", "Tax Computation"])
@@ -2432,6 +2448,10 @@ def render_tax_output_fields():
 def render_payroll_tax_engine_panel():
     st.markdown("## 💼 Payroll & Tax Engine Setup")
     st.info("Admin module: salary structure, payroll upload engine, TDS upload and payroll data preview.")
+    # Defensive init in case the SQLite file was wiped between sessions (Streamlit
+    # Cloud's ephemeral filesystem). CREATE TABLE IF NOT EXISTS is a no-op when
+    # the tables already exist.
+    init_payroll_database()
 
     tab1, tab2, tab3, tab4 = st.tabs([
         "Salary Structure Master",
@@ -2641,10 +2661,33 @@ def submit_employee_declaration(
 def load_employee_declarations(employee_id=None):
     ensure_declaration_columns()
     conn = get_db_connection()
-    if employee_id:
-        df = pd.read_sql_query("SELECT * FROM employee_investments WHERE employee_id = ? ORDER BY submitted_at DESC", conn, params=(str(employee_id),))
-    else:
-        df = pd.read_sql_query("SELECT * FROM employee_investments ORDER BY submitted_at DESC", conn)
+    try:
+        if employee_id:
+            df = pd.read_sql_query(
+                "SELECT * FROM employee_investments WHERE employee_id = ? ORDER BY submitted_at DESC",
+                conn, params=(str(employee_id),),
+            )
+        else:
+            df = pd.read_sql_query(
+                "SELECT * FROM employee_investments ORDER BY submitted_at DESC",
+                conn,
+            )
+    except Exception:
+        # Table missing on fresh container — force a rebuild and retry once
+        conn.close()
+        init_payroll_database()
+        ensure_declaration_columns()
+        conn = get_db_connection()
+        if employee_id:
+            df = pd.read_sql_query(
+                "SELECT * FROM employee_investments WHERE employee_id = ? ORDER BY submitted_at DESC",
+                conn, params=(str(employee_id),),
+            )
+        else:
+            df = pd.read_sql_query(
+                "SELECT * FROM employee_investments ORDER BY submitted_at DESC",
+                conn,
+            )
     conn.close()
     return df.fillna("")
 
@@ -3726,7 +3769,7 @@ def delete_employee_master_record(employee_id):
 
 def render_employee_master_upload_panel():
     st.markdown("## 👥 Employee Master Upload")
-    st.caption("Upload or update employees for Koenig Strides payroll and tax computation.")
+    st.caption("Upload or update employees for Koenig Stride payroll and tax computation.")
     c1, c2 = st.columns(2)
     with c1:
         upload_month = month_selectbox("Upload Month", key="emp_master_upload_month")
@@ -3813,7 +3856,7 @@ except Exception as e:
 
 
 # =====================================================
-# VOICE STRIDES - NATIVE STREAMLIT AUDIO INPUT
+# VOICE SARIKA - NATIVE STREAMLIT AUDIO INPUT
 # =====================================================
 
 def transcribe_audio_with_openai(audio_bytes):
@@ -3822,7 +3865,7 @@ def transcribe_audio_with_openai(audio_bytes):
 
     try:
         audio_file = io.BytesIO(audio_bytes)
-        audio_file.name = "strides_voice_input.wav"
+        audio_file.name = "sarika_voice_input.wav"
 
         transcript = client.audio.transcriptions.create(
             model="whisper-1",
@@ -3830,7 +3873,7 @@ def transcribe_audio_with_openai(audio_bytes):
             language="en",
             prompt=(
                 "Indian English speaker. Common terms: HRA, NPS, Section 80C, "
-                "Form 16, Form 12B, Form 12BB, Sodexo, Koenig, Strides, strides, "
+                "Form 16, Form 12B, Form 12BB, Sodexo, Koenig, Stride, Sarika, "
                 "SPOC, TDS, PAN, CTC, Rupees, lakh, crore."
             ),
         )
@@ -3867,9 +3910,9 @@ def speak_button_html(text, button_label="🔊 Speak Reply"):
     """
 
 
-def render_voice_strides_panel():
-    st.markdown("### 🎙️ Voice Strides")
-    st.caption("Record your question, then click **Transcribe & Ask Strides**.")
+def render_voice_sarika_panel():
+    st.markdown("### 🎙️ Voice Sarika")
+    st.caption("Record your question, then click **Transcribe & Ask Sarika**.")
 
     if client is None:
         st.warning("Voice transcription needs OPENAI_API_KEY in Streamlit Secrets.")
@@ -3883,15 +3926,15 @@ def render_voice_strides_panel():
 
     audio_file = st.audio_input(
         "Record your question here",
-        key="strides_native_audio_input"
+        key="sarika_native_audio_input"
     )
 
     if audio_file is not None:
         audio_bytes = audio_file.getvalue()
         st.audio(audio_bytes, format="audio/wav")
 
-        if st.button("📝 Transcribe & Ask Strides", use_container_width=True, key="voice_transcribe_ask_btn"):
-            with st.spinner("Strides is listening and thinking..."):
+        if st.button("📝 Transcribe & Ask Sarika", use_container_width=True, key="voice_transcribe_ask_btn"):
+            with st.spinner("Sarika is listening and thinking..."):
                 transcript, err = transcribe_audio_with_openai(audio_bytes)
 
                 if err:
@@ -4026,6 +4069,7 @@ def render_admin_analytics_dashboard():
     # ---------------- Payroll ----------------
     st.markdown("### 💼 Payroll Database")
     try:
+        init_payroll_database()  # ensure tables exist before counting
         conn = get_db_connection()
         emp_master_n = conn.execute("SELECT COUNT(*) FROM employee_master").fetchone()[0]
         salary_n = conn.execute("SELECT COUNT(*) FROM employee_salary_monthly").fetchone()[0]
@@ -4075,7 +4119,7 @@ def render_admin_analytics_dashboard():
             st.download_button(
                 "⬇️ Download full audit log (.csv)",
                 audit_df.to_csv(index=False).encode("utf-8"),
-                file_name="koenig_strides_audit_log.csv",
+                file_name="koenig_stride_audit_log.csv",
                 mime="text/csv",
                 use_container_width=True,
             )
@@ -4114,7 +4158,7 @@ with top2:
     st.markdown("""
     <div class='brand-row'>
         <div class='bot-icon'>☻</div>
-        <h1 class='brand-title'>Koenig Strides</h1>
+        <h1 class='brand-title'>Koenig Stride</h1>
     </div>
     <div class='brand-subtitle'>Tax & Entity Nexus Assistant — Step Forward</div>
     """, unsafe_allow_html=True)
@@ -4139,10 +4183,10 @@ left, right = st.columns([1.05, 3.6], gap="large")
 
 with left:
     st.markdown("<div class='card' style='text-align:center;'>", unsafe_allow_html=True)
-    if STRIDES_B64:
-        st.markdown(img_html(STRIDES_B64, "avatar-img"), unsafe_allow_html=True)
-    st.markdown("<h3>👩‍💼 Strides</h3>", unsafe_allow_html=True)
-    st.markdown("<div class='online'>● Strides is online</div>", unsafe_allow_html=True)
+    if SARIKA_B64:
+        st.markdown(img_html(SARIKA_B64, "avatar-img"), unsafe_allow_html=True)
+    st.markdown("<h3>👩‍💼 Sarika</h3>", unsafe_allow_html=True)
+    st.markdown("<div class='online'>● Sarika is online</div>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown("### 📌 Panels")
@@ -4154,7 +4198,7 @@ with left:
     if st.session_state.get("start_completed", False):
         st.markdown("---")
         st.markdown("### 🤖 Assistant")
-        panel_button("💬 Ask Strides", "Ask Strides")
+        panel_button("💬 Ask Sarika", "Ask Sarika")
 
         st.markdown("---")
         st.markdown("### 🧾 Employee Tax")
@@ -4175,7 +4219,7 @@ with right:
     selected_panel = st.session_state.get("selected_panel", "Home")
 
     locked_panels = [
-        "Ask Strides", "Employee Declaration", "My Tax Snapshot",
+        "Ask Sarika", "Employee Declaration", "My Tax Snapshot",
         "Payroll Tax Engine", "Declaration Approval", "User Management",
         "Knowledge Base", "Admin Analytics"
     ]
@@ -4192,12 +4236,12 @@ with right:
     if selected_panel == "Home":
         st.markdown("""
         <div class='hero' style='margin-top:24px;'>
-            <h2>Welcome to Koenig Strides</h2>
-            <p>Select a panel from the left sidebar,<br>or use Ask Strides to ask directly.</p>
+            <h2>Welcome to Koenig Stride</h2>
+            <p>Select a panel from the left sidebar,<br>or use Ask Sarika to ask directly.</p>
         </div>
         """, unsafe_allow_html=True)
         st.info(
-            "👉 Click **🚀 Start Here** in the left sidebar to unlock Ask Strides, "
+            "👉 Click **🚀 Start Here** in the left sidebar to unlock Ask Sarika, "
             "Employee Declarations, and (for Admins) the Payroll & Approval panels."
         )
 
@@ -4208,9 +4252,9 @@ with right:
     elif selected_panel == "Start Here":
         st.session_state.start_completed = True
         st.markdown("## 🚀 Start Here")
-        st.success("Assistant panels are now available in the left sidebar, including Ask Strides.")
-        if st.button("💬 Open Ask Strides", use_container_width=True):
-            st.session_state.selected_panel = "Ask Strides"
+        st.success("Assistant panels are now available in the left sidebar, including Ask Sarika.")
+        if st.button("💬 Open Ask Sarika", use_container_width=True):
+            st.session_state.selected_panel = "Ask Sarika"
             st.rerun()
         st.markdown("Select an area below, then choose a category and question.")
 
@@ -4309,22 +4353,22 @@ with right:
         render_employee_tax_summary_snapshot()
 
     # =====================================================
-    # ASK STRIDES PANEL
+    # ASK SARIKA PANEL
     # =====================================================
-    elif selected_panel == "Ask Strides":
-        st.markdown("## 💬 Ask Strides")
+    elif selected_panel == "Ask Sarika":
+        st.markdown("## 💬 Ask Sarika")
         st.markdown(
             "<div style='color:#64748b; font-size:13px; margin-top:-8px; margin-bottom:12px;'>"
-            "Chat with Strides — your AI assistant for tax, salary, labour code, entity nexus and SPOC queries."
+            "Chat with Sarika — your AI assistant for tax, salary, labour code, entity nexus and SPOC queries."
             "</div>",
             unsafe_allow_html=True
         )
 
-        with st.expander("🎙️ Voice Strides (speak instead of typing)", expanded=False):
-            if "render_voice_strides_panel" in globals():
-                render_voice_strides_panel()
+        with st.expander("🎙️ Voice Sarika (speak instead of typing)", expanded=False):
+            if "render_voice_sarika_panel" in globals():
+                render_voice_sarika_panel()
             else:
-                st.info("Voice Strides is not available in this build. Please use the text box below.")
+                st.info("Voice Sarika is not available in this build. Please use the text box below.")
 
         # ----- Chat history (newest at the bottom, like real chat apps) -----
         chat_container = st.container()
@@ -4333,7 +4377,7 @@ with right:
                 with st.chat_message("assistant", avatar="👩‍💼"):
                     st.markdown(
                         f"Hi **{st.session_state.employee_name}** 👋  \n"
-                        "I'm **Strides**, your Koenig Strides assistant. "
+                        "I'm **Sarika**, your Koenig Stride assistant. "
                         "Ask me anything about **Tax, Salary, Labour Code, Entity Nexus** or **SPOC routing**."
                     )
             else:
@@ -4365,14 +4409,14 @@ with right:
         # ----- Chat input at the bottom (widget-style, like ChatGPT/WhatsApp) -----
         user_query = st.chat_input("Type your question and press Enter… (e.g. What is NPS?)")
         if user_query and user_query.strip():
-            with st.spinner("Strides is thinking…"):
+            with st.spinner("Sarika is thinking…"):
                 submit_query(user_query.strip())
             st.rerun()
 
         if st.session_state.chat_history:
             col_clear, _ = st.columns([1, 4])
             with col_clear:
-                if st.button("🗑️ Clear chat", use_container_width=True, key="ask_strides_clear"):
+                if st.button("🗑️ Clear chat", use_container_width=True, key="ask_sarika_clear"):
                     st.session_state.chat_history = []
                     st.rerun()
 
