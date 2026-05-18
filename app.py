@@ -2487,22 +2487,45 @@ def ensure_declaration_columns():
     conn.close()
 
 
-def get_declaration_sections():
-    return [
-        "80C", "80D", "NPS 80CCD(1B)", "Employer NPS 80CCD(2)",
-        "HRA", "Home Loan Interest", "LTA", "Donation",
-        "Meal Passes / Sodexo Declaration",
-        "Telephone / Internet", "Electricity Reimbursement", "Professional / Software",
-        "Skill Development", "Power & Utility Allowance",
-        "Form 12BB", "Form 12B (Previous Employer)", "Other Deduction",
-    ]
+# Sections that remain valid under the NEW tax regime (post Apr 2020 / Sec 115BAC).
+# Under the new regime, most Chapter VI-A deductions and salary exemptions are
+# NOT allowed. The two practical exceptions retained for Koenig employees are:
+#   1. Meal Passes / Sodexo Declaration — perquisite, not a tax exemption (Rule 3(7)(iii))
+#   2. Employer NPS 80CCD(2) — employer's contribution to NPS still allowed under new regime
+# Plus Form 12B (previous employer) is always relevant when joining mid-year,
+# regardless of regime, because it ensures correct year-to-date TDS.
+NEW_REGIME_ALLOWED_SECTIONS = {
+    "Meal Passes / Sodexo Declaration",
+    "Employer NPS 80CCD(2)",
+    "Form 12B (Previous Employer)",
+}
+
+ALL_DECLARATION_SECTIONS = [
+    "80C", "80D", "NPS 80CCD(1B)", "Employer NPS 80CCD(2)",
+    "HRA", "Home Loan Interest", "Donation",
+    "Meal Passes / Sodexo Declaration",
+    "Telephone / Internet", "Electricity Reimbursement", "Professional / Software",
+    "Skill Development", "Power & Utility Allowance",
+    "Form 12BB", "Form 12B (Previous Employer)", "Other Deduction",
+]
+
+
+def get_declaration_sections(tax_regime: str = "Old"):
+    """Return the list of declaration sections valid for the given regime.
+
+    NEW regime → only the small list of allowed sections.
+    OLD regime → the full list of sections.
+    """
+    if str(tax_regime).strip().lower() == "new":
+        return [s for s in ALL_DECLARATION_SECTIONS if s in NEW_REGIME_ALLOWED_SECTIONS]
+    return list(ALL_DECLARATION_SECTIONS)
 
 
 def get_section_default_limit(section):
     limits = {
         "80C": 150000, "80D": 25000, "NPS 80CCD(1B)": 50000,
         "Employer NPS 80CCD(2)": 0, "HRA": 0, "Home Loan Interest": 200000,
-        "LTA": 0, "Donation": 0, "Meal Passes / Sodexo Declaration": 105600,
+        "Donation": 0, "Meal Passes / Sodexo Declaration": 105600,
         "Telephone / Internet": 0, "Electricity Reimbursement": 0,
         "Professional / Software": 0, "Skill Development": 0,
         "Power & Utility Allowance": 0, "Form 12BB": 0,
@@ -2677,7 +2700,33 @@ def render_employee_declaration_portal():
         ["Investment", "Reimbursement", "Allowance", "Form 12BB", "Form 12B (Previous Employer)", "Other"],
         key="emp_decl_type",
     )
-    section = st.selectbox("Section / Component", get_declaration_sections(), key="emp_decl_section")
+
+    # Regime-aware section list: under New Regime, only a handful of declarations
+    # actually reduce tax. Show a clear notice so employees aren't confused.
+    sections_for_regime = get_declaration_sections(tax_regime)
+    if str(tax_regime).strip().lower() == "new":
+        st.info(
+            "ℹ️ **New Tax Regime selected.** Under Section 115BAC, most Chapter VI-A "
+            "deductions and salary exemptions (80C, 80D, HRA, Home Loan Interest, LTA, "
+            "Donations, Reimbursements, etc.) are **NOT applicable**. "
+            "Only these are still considered for tax computation: "
+            "**Meal Passes / Sodexo**, **Employer NPS 80CCD(2)**, and **Form 12B "
+            "(previous employer details)**."
+        )
+
+    # If the previously-selected section is no longer valid under the new regime,
+    # reset it so the selectbox doesn't crash.
+    if (
+        "emp_decl_section" in st.session_state
+        and st.session_state["emp_decl_section"] not in sections_for_regime
+    ):
+        del st.session_state["emp_decl_section"]
+
+    section = st.selectbox(
+        "Section / Component",
+        sections_for_regime,
+        key="emp_decl_section",
+    )
     eligible_limit = get_section_default_limit(section)
 
     # ============================================================
@@ -3371,20 +3420,90 @@ def render_employee_tax_summary_snapshot():
     if df.empty:
         st.info("No declaration data yet. Submit investment/reimbursement proofs to see your tax snapshot.")
         return
-    approved_df = df[df["status"] == "Approved"]
-    pending_df = df[df["status"] == "Pending"]
-    rejected_df = df[df["status"] == "Rejected"]
-    approved_amount = pd.to_numeric(approved_df.get("approved_amount", 0), errors="coerce").fillna(0).sum()
+
+    # Let the employee toggle which regime view they want. Defaults to the regime
+    # used in their most recent declaration so the view feels natural.
+    default_regime = "Old"
+    try:
+        latest_regime = str(df.iloc[0].get("tax_regime", "")).strip()
+        if latest_regime.lower() in ["old", "new"]:
+            default_regime = latest_regime.title()
+    except Exception:
+        pass
+
+    regime_idx = 0 if default_regime == "New" else 1
+    selected_regime = st.radio(
+        "Tax Regime view",
+        ["New", "Old"],
+        index=regime_idx,
+        horizontal=True,
+        key="tax_snapshot_regime",
+        help="Switch to see what your tax-saving picture looks like under each regime.",
+    )
+
+    if selected_regime == "New":
+        st.info(
+            "ℹ️ Under the **New Tax Regime** (Sec 115BAC), only "
+            "**Meal Passes / Sodexo** and **Employer NPS 80CCD(2)** declarations "
+            "reduce taxable income. All other declarations are shown for record but "
+            "do **NOT** count towards tax savings."
+        )
+
+    approved_df = df[df["status"] == "Approved"].copy()
+    pending_df = df[df["status"] == "Pending"].copy()
+    rejected_df = df[df["status"] == "Rejected"].copy()
+
+    # ---- Counted vs ignored under the selected regime ----
+    if selected_regime == "New":
+        counted_mask = approved_df["section"].astype(str).isin(NEW_REGIME_ALLOWED_SECTIONS)
+        counted_df = approved_df[counted_mask].copy()
+        ignored_df = approved_df[~counted_mask].copy()
+    else:
+        counted_df = approved_df.copy()
+        ignored_df = approved_df.iloc[0:0].copy()  # empty
+
+    counted_amount = pd.to_numeric(counted_df.get("approved_amount", 0), errors="coerce").fillna(0).sum()
+    ignored_amount = pd.to_numeric(ignored_df.get("approved_amount", 0), errors="coerce").fillna(0).sum()
     pending_amount = pd.to_numeric(pending_df.get("claimed_amount", 0), errors="coerce").fillna(0).sum()
     rejected_amount = pd.to_numeric(rejected_df.get("claimed_amount", 0), errors="coerce").fillna(0).sum()
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Approved Declarations", f"₹{approved_amount:,.0f}")
-    c2.metric("Pending Review", f"₹{pending_amount:,.0f}")
-    c3.metric("Rejected Claims", f"₹{rejected_amount:,.0f}")
-    if not approved_df.empty:
-        section_summary = approved_df.groupby("section", as_index=False)["approved_amount"].sum().sort_values("approved_amount", ascending=False)
-        st.markdown("#### Approved Amount by Section")
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric(
+        "✅ Counted for Tax",
+        f"₹{counted_amount:,.0f}",
+        help=f"Approved declarations that reduce taxable income under the {selected_regime} regime.",
+    )
+    c2.metric(
+        "⚠️ Approved but Not Counted",
+        f"₹{ignored_amount:,.0f}",
+        help="Approved but ignored because the New Regime disallows this deduction." if selected_regime == "New" else "\u2014",
+    )
+    c3.metric("Pending Review", f"₹{pending_amount:,.0f}")
+    c4.metric("Rejected Claims", f"₹{rejected_amount:,.0f}")
+
+    if not counted_df.empty:
+        st.markdown("#### ✅ Tax-Counted Approved Amount by Section")
+        section_summary = (
+            counted_df.groupby("section", as_index=False)["approved_amount"]
+            .sum()
+            .sort_values("approved_amount", ascending=False)
+        )
         st.dataframe(section_summary, use_container_width=True, hide_index=True)
+
+    if not ignored_df.empty and selected_regime == "New":
+        with st.expander(
+            f"⚠️ Approved but not counted under New Regime (₹{ignored_amount:,.0f})",
+            expanded=False,
+        ):
+            st.dataframe(
+                ignored_df[["section", "investment_type", "approved_amount", "approved_at"]],
+                use_container_width=True,
+                hide_index=True,
+            )
+            st.caption(
+                "These were approved while you were on the Old Regime (or before you switched). "
+                "They do **not** affect your tax liability under the New Regime."
+            )
 
 # =====================================================
 # LOGOUT
@@ -4102,7 +4221,7 @@ with right:
             ("✅ Salary Queries", "Salary Queries"),
             ("⚖️ Labour Code", "Labour Code"),
             ("✅ Entity Nexus", "Entity Nexus"),
-            ("✅ SPOC Routing", "SPOC Routing"),
+            ("📞 SPOC", "SPOC"),
             ("🔒 Protected Information Routing", "Protected Information Routing"),
             ("✅ Compliance Support", "Compliance Support"),
         ]
@@ -4116,26 +4235,35 @@ with right:
 
         if st.session_state.selected_module:
             selected = st.session_state.selected_module
-            st.markdown("<div class='card'>", unsafe_allow_html=True)
-            st.markdown(f"<span class='selected-pill'>Selected: {selected}</span>", unsafe_allow_html=True)
-            st.markdown("### Select Category")
-            categories = get_categories_for_module(faq_df, selected)
-            if categories:
-                for category in categories:
-                    cat_df = get_questions_by_module_category(faq_df, selected, category)
-                    if cat_df.empty:
-                        continue
-                    with st.expander(f"📂 {category} ({len(cat_df)} questions)", expanded=False):
-                        q_col = get_question_column(cat_df)
-                        for _, row in cat_df.iterrows():
-                            question = safe_get(row, q_col or "Question")
-                            if not question:
-                                continue
-                            with st.expander(f"❓ {question}", expanded=False):
-                                render_answer(row)
+
+            # SPOC — show the SPOC directory directly (no category browsing).
+            if selected in ("SPOC", "SPOC Routing"):  # accept legacy value too
+                st.markdown("<div class='card'>", unsafe_allow_html=True)
+                st.markdown(f"<span class='selected-pill'>Selected: {selected}</span>", unsafe_allow_html=True)
+                st.markdown("### 📞 SPOC Directory")
+                render_spoc_routing()
+                st.markdown("</div>", unsafe_allow_html=True)
             else:
-                st.info("No categories found under this section. Please check the Category column in Excel.")
-            st.markdown("</div>", unsafe_allow_html=True)
+                st.markdown("<div class='card'>", unsafe_allow_html=True)
+                st.markdown(f"<span class='selected-pill'>Selected: {selected}</span>", unsafe_allow_html=True)
+                st.markdown("### Select Category")
+                categories = get_categories_for_module(faq_df, selected)
+                if categories:
+                    for category in categories:
+                        cat_df = get_questions_by_module_category(faq_df, selected, category)
+                        if cat_df.empty:
+                            continue
+                        with st.expander(f"📂 {category} ({len(cat_df)} questions)", expanded=False):
+                            q_col = get_question_column(cat_df)
+                            for _, row in cat_df.iterrows():
+                                question = safe_get(row, q_col or "Question")
+                                if not question:
+                                    continue
+                                with st.expander(f"❓ {question}", expanded=False):
+                                    render_answer(row)
+                else:
+                    st.info("No categories found under this section. Please check the Category column in Excel.")
+                st.markdown("</div>", unsafe_allow_html=True)
 
     # =====================================================
     # ACCOUNT PANEL
