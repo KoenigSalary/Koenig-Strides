@@ -2170,6 +2170,35 @@ def import_tds_monthly(df, tax_year, salary_month, mode):
     return count, ""
 
 
+# ---- Standard month helpers (Indian Financial Year: April → March) ----
+FY_MONTHS = [
+    "April", "May", "June", "July", "August", "September",
+    "October", "November", "December", "January", "February", "March"
+]
+
+
+def current_fy_month_index():
+    """Return the index (0-11) into FY_MONTHS for the current calendar month.
+    April = 0, May = 1, … March = 11."""
+    cal_month = datetime.now().month  # 1=Jan … 12=Dec
+    # Mapping: Apr(4)->0, May(5)->1, ..., Dec(12)->8, Jan(1)->9, Feb(2)->10, Mar(3)->11
+    return (cal_month - 4) % 12
+
+
+def month_selectbox(label, key, default_index=None, help_text=None):
+    """A single reusable dropdown for picking an FY month.
+    Defaults to the current calendar month if no default_index is given."""
+    if default_index is None:
+        default_index = current_fy_month_index()
+    return st.selectbox(
+        label,
+        FY_MONTHS,
+        index=int(default_index),
+        key=key,
+        help=help_text or "Indian Financial Year months (April → March)",
+    )
+
+
 # ---- Excel template builder for upload panels ----
 UPLOAD_TEMPLATES = {
     "Employee Master": [
@@ -2230,15 +2259,11 @@ def render_payroll_upload_engine():
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        tax_year = st.text_input("Tax Year", value="2026-27")
+        tax_year = st.text_input("Tax Year", value="2026-27", key="payroll_upload_tax_year")
     with c2:
-        salary_month = st.selectbox(
-            "Month",
-            ["April", "May", "June", "July", "August", "September", "October", "November", "December", "January", "February", "March"],
-            index=0
-        )
+        salary_month = month_selectbox("Month", key="payroll_upload_month")
     with c3:
-        mode = st.selectbox("Import Mode", ["Append", "Overwrite Month"])
+        mode = st.selectbox("Import Mode", ["Append", "Overwrite Month"], key="payroll_upload_mode")
 
     uploaded_file = st.file_uploader(
         "Upload Excel file",
@@ -2276,6 +2301,18 @@ def render_payroll_upload_engine():
             st.error(f"Unable to process uploaded file: {e}")
 
 
+def _apply_month_year_filter(df, year_val, month_val):
+    """Filter a payroll df by financial_year and salary_month if user picked a value."""
+    if df.empty:
+        return df
+    out = df.copy()
+    if year_val and year_val != "All" and "financial_year" in out.columns:
+        out = out[out["financial_year"].astype(str) == str(year_val)]
+    if month_val and month_val != "All" and "salary_month" in out.columns:
+        out = out[out["salary_month"].astype(str) == str(month_val)]
+    return out
+
+
 def render_payroll_data_preview():
     st.markdown("### 📊 Payroll Data Preview")
 
@@ -2286,18 +2323,61 @@ def render_payroll_data_preview():
     with tab1:
         df = pd.read_sql_query("SELECT * FROM employee_master ORDER BY employee_id", conn)
         st.dataframe(df, use_container_width=True)
+        if not df.empty:
+            st.caption(f"{len(df)} record(s)")
 
     with tab2:
-        df = pd.read_sql_query("SELECT * FROM employee_salary_monthly ORDER BY uploaded_at DESC, employee_id", conn)
-        st.dataframe(df, use_container_width=True)
+        df = pd.read_sql_query(
+            "SELECT * FROM employee_salary_monthly ORDER BY uploaded_at DESC, employee_id",
+            conn,
+        )
+        if df.empty:
+            st.info("No salary records uploaded yet.")
+        else:
+            years = sorted(df.get("financial_year", pd.Series(dtype=str)).dropna().astype(str).unique().tolist())
+            fc1, fc2 = st.columns(2)
+            with fc1:
+                year_filter = st.selectbox(
+                    "Tax Year", ["All"] + years, index=0, key="prev_salary_year"
+                )
+            with fc2:
+                month_filter = st.selectbox(
+                    "Month", ["All"] + FY_MONTHS, index=0, key="prev_salary_month"
+                )
+            filtered = _apply_month_year_filter(df, year_filter, month_filter)
+            st.dataframe(filtered, use_container_width=True)
+            st.caption(f"{len(filtered)} record(s) of {len(df)} total")
 
     with tab3:
-        df = pd.read_sql_query("SELECT * FROM employee_tds_monthly ORDER BY uploaded_at DESC, employee_id", conn)
-        st.dataframe(df, use_container_width=True)
+        df = pd.read_sql_query(
+            "SELECT * FROM employee_tds_monthly ORDER BY uploaded_at DESC, employee_id",
+            conn,
+        )
+        if df.empty:
+            st.info("No TDS records uploaded yet.")
+        else:
+            years = sorted(df.get("financial_year", pd.Series(dtype=str)).dropna().astype(str).unique().tolist())
+            fc1, fc2 = st.columns(2)
+            with fc1:
+                year_filter = st.selectbox(
+                    "Tax Year", ["All"] + years, index=0, key="prev_tds_year"
+                )
+            with fc2:
+                month_filter = st.selectbox(
+                    "Month", ["All"] + FY_MONTHS, index=0, key="prev_tds_month"
+                )
+            filtered = _apply_month_year_filter(df, year_filter, month_filter)
+            st.dataframe(filtered, use_container_width=True)
+            st.caption(f"{len(filtered)} record(s) of {len(df)} total")
 
     with tab4:
-        df = pd.read_sql_query("SELECT * FROM employee_tax_computation ORDER BY computed_at DESC, employee_id", conn)
+        df = pd.read_sql_query(
+            "SELECT * FROM employee_tax_computation ORDER BY computed_at DESC, employee_id",
+            conn,
+        )
         st.dataframe(df, use_container_width=True)
+        if not df.empty:
+            st.caption(f"{len(df)} record(s)")
 
     conn.close()
 
@@ -3201,7 +3281,7 @@ def render_employee_master_upload_panel():
     st.caption("Upload or update employees for Koenig Stride payroll and tax computation.")
     c1, c2 = st.columns(2)
     with c1:
-        upload_month = st.text_input("Upload Month", value=datetime.now().strftime("%B %Y"), key="emp_master_upload_month")
+        upload_month = month_selectbox("Upload Month", key="emp_master_upload_month")
     with c2:
         tax_year = st.text_input("Tax Year", value="2026-27", key="emp_master_tax_year")
 
