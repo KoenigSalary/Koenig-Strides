@@ -1534,6 +1534,26 @@ def init_payroll_database():
         )
     """)
 
+    # Dedicated PLI / Incentive / Bonus monthly table — keeps incentive
+    # payouts separate from base salary for cleaner tax computation.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS employee_pli_monthly (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            employee_id TEXT,
+            employee_name TEXT,
+            financial_year TEXT,
+            salary_month TEXT,
+            pli_amount REAL DEFAULT 0,
+            incentive_amount REAL DEFAULT 0,
+            performance_bonus REAL DEFAULT 0,
+            profit_sharing REAL DEFAULT 0,
+            other_variable_pay REAL DEFAULT 0,
+            total_variable_pay REAL DEFAULT 0,
+            remarks TEXT DEFAULT '',
+            uploaded_at TEXT DEFAULT ''
+        )
+    """)
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS employee_tds_monthly (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1692,15 +1712,39 @@ def normalize_header(value):
     )
 
 
-def find_column(df, possible_names):
+# Aliases shorter than this won't be matched as substrings to prevent
+# accidental matches like "OT" -> "TotalDays".
+_MIN_FUZZY_LEN = 4
+
+
+def find_column(df, possible_names, exact_only=False):
+    """Resolve a logical column to its actual Excel header.
+
+    Strategy:
+      1. Exact match on normalized headers (case + punctuation insensitive).
+      2. Fuzzy substring match — BUT only for aliases of length >= 4 to avoid
+         false positives like "OT" matching "TotalDays" or "PF" matching
+         "BasicPercent". Short aliases must match exactly.
+
+    Pass exact_only=True to disable fuzzy matching entirely (use when a column
+    name like "Total Income From Salary" could be confused with a shorter
+    header like "Salary").
+    """
     normalized_cols = {normalize_header(c): c for c in df.columns}
     possible_norm = [normalize_header(x) for x in possible_names]
 
+    # Pass 1: exact match
     for p in possible_norm:
         if p in normalized_cols:
             return normalized_cols[p]
 
+    if exact_only:
+        return None
+
+    # Pass 2: fuzzy substring match, but only for sufficiently long aliases
     for p in possible_norm:
+        if len(p) < _MIN_FUZZY_LEN:
+            continue
         for norm_col, original_col in normalized_cols.items():
             if p in norm_col or norm_col in p:
                 return original_col
@@ -2000,8 +2044,8 @@ def render_salary_structure_master_panel():
 
 
 def import_employee_master(df):
-    emp_id_col = find_column(df, ["Employee ID", "EmployeeID", "Emp ID", "EmpCode"])
-    emp_name_col = find_column(df, ["Employee Name", "Name", "Emp Name"])
+    emp_id_col = find_column(df, ["Employee ID", "EmployeeID", "Emp ID", "EmpCode", "Employee Code", "Emp Code"])
+    emp_name_col = find_column(df, ["Employee Name", "EmployeeName", "Name", "Emp Name"])
     tax_regime_col = find_column(df, ["Tax Regime", "Regime"])
     pan_col = find_column(df, ["PAN", "PAN No", "Pan No."])
     gender_col = find_column(df, ["Gender"])
@@ -2047,26 +2091,33 @@ def import_employee_master(df):
 
 
 def import_salary_monthly(df, tax_year, salary_month, mode):
-    emp_id_col = find_column(df, ["Employee ID", "EmployeeID", "Emp ID", "EmpCode"])
-    emp_name_col = find_column(df, ["Employee Name", "Name", "Emp Name"])
+    emp_id_col = find_column(df, ["Employee ID", "EmployeeID", "Emp ID", "EmpCode", "Employee Code", "Emp Code"])
+    emp_name_col = find_column(df, ["Employee Name", "EmployeeName", "Name", "Emp Name"])
     gross_col = find_column(df, ["Gross Salary", "Gross", "Salary", "Annual Salary / CTC", "CTC"])
     basic_col = find_column(df, ["Basic", "Basic Salary"])
     hra_col = find_column(df, ["HRA"])
-    sodexo_col = find_column(df, ["Sodexo", "Meal Passes", "Meal Passess"])
+    sodexo_col = find_column(df, ["Sodexo", "Meal Passes", "Meal Passess", "Sodexo / Meal Passes"])
     tel_col = find_column(df, ["Telephone / Internet", "Telephone", "Internet"])
     elec_col = find_column(df, ["Electricity Reimbursement", "Electricity"])
     prof_col = find_column(df, ["Professional / Software", "Software", "Professional"])
     skill_col = find_column(df, ["Skill Development"])
     utility_col = find_column(df, ["Power & Utility Allowance", "Power Utility", "Utility Allowance"])
-    taxable_allowance_col = find_column(df, ["Taxable Allowance"])
-    ot_col = find_column(df, ["OT/PLI/Profit sharing", "OT", "PLI", "Profit sharing"])
-    exgratia_col = find_column(df, ["EXGRATIA", "Exgratia"])
+    taxable_allowance_col = find_column(df, ["Taxable Allowance", "Taxable Allowances", "Special Allowance", "Special Allowances"])
+    # Use the full phrase to avoid "OT" matching "TotalDays".
+    ot_col = find_column(df, ["OT/PLI/Profit sharing", "OT PLI Profit Sharing", "Profit sharing"])
+    exgratia_col = find_column(df, ["EXGRATIA", "Exgratia", "Ex Gratia"])
     gratuity_col = find_column(df, ["Gratuity"])
     severance_col = find_column(df, ["Severance"])
     leave_col = find_column(df, ["LeaveEncashment", "Leave Encashment"])
     referral_col = find_column(df, ["Referralbonus", "Referral Bonus"])
     other_col = find_column(df, ["OtherAdjustment", "Other Adjustment"])
-    total_income_col = find_column(df, ["Total Income From Salary", "Total Income from Salary"])
+    # Use the full phrase only — the short alias "Salary" would clash with Gross.
+    # Use exact_only=True to disable fuzzy matching for this field specifically.
+    total_income_col = find_column(
+        df,
+        ["Total Income From Salary", "Total Income from Salary", "Net Payable", "NetPayable"],
+        exact_only=True,
+    )
 
     if not emp_id_col:
         return 0, "Employee ID column not found."
@@ -2129,15 +2180,83 @@ def import_salary_monthly(df, tax_year, salary_month, mode):
     return count, ""
 
 
+def import_pli_monthly(df, tax_year, salary_month, mode):
+    """Import a monthly PLI / Incentive / Bonus sheet."""
+    emp_id_col = find_column(df, ["Employee ID", "EmployeeID", "Emp ID", "EmpCode", "Employee Code", "Emp Code"])
+    emp_name_col = find_column(df, ["Employee Name", "EmployeeName", "Name", "Emp Name"])
+    pli_col = find_column(df, ["PLI", "PLI Amount", "Performance Linked Incentive"])
+    incentive_col = find_column(df, ["Incentive", "Incentive Amount", "Monthly Incentive"])
+    bonus_col = find_column(df, ["Performance Bonus", "Bonus", "Performance"])
+    profit_col = find_column(df, ["Profit Sharing", "Profit Share", "PS"])
+    other_col = find_column(df, ["Other Variable Pay", "Variable Pay", "Other Variable"])
+    total_col = find_column(df, ["Total Variable Pay", "Total Incentive", "Total PLI"], exact_only=True)
+    remarks_col = find_column(df, ["Remarks", "Notes", "Comments"])
+
+    if not emp_id_col:
+        return 0, "Employee ID column not found."
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    if mode == "Overwrite Month":
+        cur.execute(
+            "DELETE FROM employee_pli_monthly WHERE financial_year = ? AND salary_month = ?",
+            (tax_year, salary_month),
+        )
+
+    count = 0
+    for _, row in df.iterrows():
+        employee_id = text_value(row, emp_id_col)
+        if not employee_id:
+            continue
+        pli_amt = money_value(row, pli_col)
+        inc_amt = money_value(row, incentive_col)
+        bonus_amt = money_value(row, bonus_col)
+        profit_amt = money_value(row, profit_col)
+        other_amt = money_value(row, other_col)
+        # Auto-compute total if not explicitly provided in the sheet
+        explicit_total = money_value(row, total_col) if total_col else 0
+        total_amt = explicit_total if explicit_total > 0 else (pli_amt + inc_amt + bonus_amt + profit_amt + other_amt)
+
+        cur.execute(
+            """
+            INSERT INTO employee_pli_monthly (
+                employee_id, employee_name, financial_year, salary_month,
+                pli_amount, incentive_amount, performance_bonus, profit_sharing,
+                other_variable_pay, total_variable_pay, remarks, uploaded_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                employee_id,
+                text_value(row, emp_name_col),
+                tax_year,
+                salary_month,
+                pli_amt,
+                inc_amt,
+                bonus_amt,
+                profit_amt,
+                other_amt,
+                total_amt,
+                text_value(row, remarks_col),
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            ),
+        )
+        count += 1
+
+    conn.commit()
+    conn.close()
+    return count, ""
+
+
 def import_tds_monthly(df, tax_year, salary_month, mode):
-    emp_id_col = find_column(df, ["Employee ID", "EmployeeID", "Emp ID", "EmpCode"])
-    emp_name_col = find_column(df, ["Employee Name", "Name", "Emp Name"])
-    tds_col = find_column(df, ["TDS", "TDS Deducted", "Tax Deducted"])
-    tax1_col = find_column(df, ["Tax1"])
-    tax2_col = find_column(df, ["Tax2"])
-    tax3_col = find_column(df, ["Tax3"])
-    tax4_col = find_column(df, ["Tax4"])
-    tax5_col = find_column(df, ["Tax5"])
+    emp_id_col = find_column(df, ["Employee ID", "EmployeeID", "Emp ID", "EmpCode", "Employee Code", "Emp Code"])
+    emp_name_col = find_column(df, ["Employee Name", "EmployeeName", "Name", "Emp Name"])
+    tds_col = find_column(df, ["Salary TDS", "TDS Deducted", "Tax Deducted", "TDS"])
+    tax1_col = find_column(df, ["Tax1", "Tax 1", "Total Tax"])
+    tax2_col = find_column(df, ["Tax2", "Tax 2", "Cess 4%", "Cess"])
+    tax3_col = find_column(df, ["Tax3", "Tax 3", "Total Tax After Cess"])
+    tax4_col = find_column(df, ["Tax4", "Tax 4", "Total Deduction"])
+    tax5_col = find_column(df, ["Tax5", "Tax 5", "Net Deductible"])
 
     if not emp_id_col:
         return 0, "Employee ID column not found."
@@ -2228,6 +2347,11 @@ UPLOAD_TEMPLATES = {
         "Gratuity", "Severance", "Leave Encashment", "Referral Bonus",
         "Other Adjustment", "Total Income from Salary"
     ],
+    "PLI / Incentive": [
+        "Employee ID", "Employee Name", "PLI", "Incentive",
+        "Performance Bonus", "Profit Sharing", "Other Variable Pay",
+        "Total Variable Pay", "Remarks"
+    ],
     "TDS Deduction": [
         "Employee ID", "Employee Name", "TDS Deducted",
         "Total Tax", "Cess 4%", "Total Tax After Cess",
@@ -2248,12 +2372,21 @@ def build_excel_template(columns, sheet_name="Template"):
 
 def render_payroll_upload_engine():
     st.markdown("### 📤 Payroll Upload Engine")
-    st.caption("Upload Employee Master, Salary Computation Excel, and TDS Excel.")
+    st.caption(
+        "Upload one file at a time. Switch the **Upload Type** dropdown below to "
+        "toggle between Employee Master, Salary Computation, PLI / Incentive, and TDS."
+    )
 
     upload_type = st.selectbox(
         "Upload Type",
-        ["Employee Master", "Salary Computation", "TDS Deduction"],
-        key="payroll_upload_type"
+        ["Employee Master", "Salary Computation", "PLI / Incentive", "TDS Deduction"],
+        key="payroll_upload_type",
+        help=(
+            "Employee Master — employee directory (PAN, DOJ, Tax Regime, etc.)\n"
+            "Salary Computation — monthly fixed-pay components (Basic, HRA, reimbursements)\n"
+            "PLI / Incentive — monthly variable pay (PLI, incentives, bonus, profit-sharing)\n"
+            "TDS Deduction — monthly tax deducted at source"
+        ),
     )
 
     # Template download for the chosen upload type
@@ -2304,6 +2437,8 @@ def render_payroll_upload_engine():
                     count, err = import_employee_master(upload_df)
                 elif upload_type == "Salary Computation":
                     count, err = import_salary_monthly(upload_df, tax_year, salary_month, mode)
+                elif upload_type == "PLI / Incentive":
+                    count, err = import_pli_monthly(upload_df, tax_year, salary_month, mode)
                 else:
                     count, err = import_tds_monthly(upload_df, tax_year, salary_month, mode)
 
@@ -2334,7 +2469,9 @@ def render_payroll_data_preview():
     init_payroll_database()  # ensure tables exist (no-op if already created)
     conn = get_db_connection()
 
-    tab1, tab2, tab3, tab4 = st.tabs(["Employee Master", "Salary Monthly", "TDS Monthly", "Tax Computation"])
+    tab1, tab2, tab_pli, tab3, tab4 = st.tabs([
+        "Employee Master", "Salary Monthly", "PLI / Incentive", "TDS Monthly", "Tax Computation"
+    ])
 
     with tab1:
         df = pd.read_sql_query("SELECT * FROM employee_master ORDER BY employee_id", conn)
@@ -2363,6 +2500,38 @@ def render_payroll_data_preview():
             filtered = _apply_month_year_filter(df, year_filter, month_filter)
             st.dataframe(filtered, use_container_width=True)
             st.caption(f"{len(filtered)} record(s) of {len(df)} total")
+
+    with tab_pli:
+        try:
+            df_pli = pd.read_sql_query(
+                "SELECT * FROM employee_pli_monthly ORDER BY uploaded_at DESC, employee_id",
+                conn,
+            )
+        except Exception:
+            init_payroll_database()
+            df_pli = pd.read_sql_query(
+                "SELECT * FROM employee_pli_monthly ORDER BY uploaded_at DESC, employee_id",
+                conn,
+            )
+        if df_pli.empty:
+            st.info("No PLI / Incentive records uploaded yet.")
+        else:
+            years = sorted(
+                df_pli.get("financial_year", pd.Series(dtype=str))
+                .dropna().astype(str).unique().tolist()
+            )
+            fc1, fc2 = st.columns(2)
+            with fc1:
+                year_filter = st.selectbox(
+                    "Tax Year", ["All"] + years, index=0, key="prev_pli_year"
+                )
+            with fc2:
+                month_filter = st.selectbox(
+                    "Month", ["All"] + FY_MONTHS, index=0, key="prev_pli_month"
+                )
+            filtered = _apply_month_year_filter(df_pli, year_filter, month_filter)
+            st.dataframe(filtered, use_container_width=True)
+            st.caption(f"{len(filtered)} record(s) of {len(df_pli)} total")
 
     with tab3:
         df = pd.read_sql_query(
@@ -4099,17 +4268,19 @@ def render_admin_analytics_dashboard():
         conn = get_db_connection()
         emp_master_n = conn.execute("SELECT COUNT(*) FROM employee_master").fetchone()[0]
         salary_n = conn.execute("SELECT COUNT(*) FROM employee_salary_monthly").fetchone()[0]
+        pli_n = conn.execute("SELECT COUNT(*) FROM employee_pli_monthly").fetchone()[0]
         tds_n = conn.execute("SELECT COUNT(*) FROM employee_tds_monthly").fetchone()[0]
         inv_n = conn.execute("SELECT COUNT(*) FROM employee_investments").fetchone()[0]
         conn.close()
     except Exception:
-        emp_master_n = salary_n = tds_n = inv_n = 0
+        emp_master_n = salary_n = pli_n = tds_n = inv_n = 0
 
-    p1, p2, p3, p4 = st.columns(4)
+    p1, p2, p3, p4, p5 = st.columns(5)
     p1.metric("Employee Master", emp_master_n)
     p2.metric("Salary Records", salary_n)
-    p3.metric("TDS Records", tds_n)
-    p4.metric("Investment Rows", inv_n)
+    p3.metric("PLI Records", pli_n)
+    p4.metric("TDS Records", tds_n)
+    p5.metric("Investment Rows", inv_n)
 
     # ---------------- Storage health (Streamlit Cloud warning) ----------------
     st.markdown("### ⚠️ Storage Health")
