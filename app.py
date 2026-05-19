@@ -2138,10 +2138,12 @@ def import_salary_monthly(df, tax_year, salary_month, mode):
         )
 
     count = 0
+    skipped = 0
 
     for _, row in df.iterrows():
         employee_id = text_value(row, emp_id_col)
         if not employee_id:
+            skipped += 1
             continue
 
         cur.execute("""
@@ -2183,7 +2185,16 @@ def import_salary_monthly(df, tax_year, salary_month, mode):
 
     conn.commit()
     conn.close()
-    return count, ""
+    msg = ""
+    if count == 0:
+        msg = (
+            "⚠️ No rows were imported. Every row in the sheet had an empty "
+            f"Employee ID column ('{emp_id_col}'). "
+            "Check that the column has values starting from row 2."
+        )
+    elif skipped > 0:
+        msg = f"ℹ️ Skipped {skipped} row(s) with blank Employee ID."
+    return count, msg
 
 
 def import_pli_monthly(df, tax_year, salary_month, mode):
@@ -2217,9 +2228,11 @@ def import_pli_monthly(df, tax_year, salary_month, mode):
         )
 
     count = 0
+    skipped = 0
     for _, row in df.iterrows():
         employee_id = text_value(row, emp_id_col)
         if not employee_id:
+            skipped += 1
             continue
         pli_amt = money_value(row, pli_col)
         inc_amt = money_value(row, incentive_col)
@@ -2257,7 +2270,15 @@ def import_pli_monthly(df, tax_year, salary_month, mode):
 
     conn.commit()
     conn.close()
-    return count, ""
+    msg = ""
+    if count == 0:
+        msg = (
+            "⚠️ No rows were imported. Every row in the sheet had an empty "
+            f"Employee ID column ('{emp_id_col}')."
+        )
+    elif skipped > 0:
+        msg = f"ℹ️ Skipped {skipped} row(s) with blank Employee ID."
+    return count, msg
 
 
 def import_tds_monthly(df, tax_year, salary_month, mode):
@@ -2289,10 +2310,12 @@ def import_tds_monthly(df, tax_year, salary_month, mode):
         )
 
     count = 0
+    skipped = 0
 
     for _, row in df.iterrows():
         employee_id = text_value(row, emp_id_col)
         if not employee_id:
+            skipped += 1
             continue
 
         cur.execute("""
@@ -2319,7 +2342,15 @@ def import_tds_monthly(df, tax_year, salary_month, mode):
 
     conn.commit()
     conn.close()
-    return count, ""
+    msg = ""
+    if count == 0:
+        msg = (
+            "⚠️ No rows were imported. Every row in the sheet had an empty "
+            f"Employee ID column ('{emp_id_col}')."
+        )
+    elif skipped > 0:
+        msg = f"ℹ️ Skipped {skipped} row(s) with blank Employee ID."
+    return count, msg
 
 
 # ---- Standard month helpers (Indian Financial Year: April → March) ----
@@ -2460,10 +2491,64 @@ def render_payroll_upload_engine():
                 else:
                     count, err = import_tds_monthly(upload_df, tax_year, salary_month, mode)
 
-                if err:
+                # Surface error first (a hard failure like missing Employee ID column)
+                if err and err.startswith("❌"):
                     st.error(err)
+                elif count == 0:
+                    # Soft failure: function returned 0 rows imported
+                    st.error(
+                        f"❌ **0 rows imported** for {upload_type}.\n\n{err or ''}\n\n"
+                        "Check the preview above — the rows you expect to import "
+                        "may have a blank Employee ID, or there's a header-row "
+                        "mismatch. The data was **NOT** written to the database."
+                    )
                 else:
-                    st.success(f"{count} row(s) imported successfully for {upload_type}.")
+                    st.success(
+                        f"✅ **{count} row(s) imported successfully** for {upload_type} "
+                        f"— Tax Year {tax_year}, Month {salary_month if upload_type != 'Employee Master' else '—'}."
+                    )
+                    if err:  # informational warning (e.g. skipped some rows)
+                        st.info(err)
+
+                    # Immediate verification: count rows actually in DB right now
+                    try:
+                        conn = get_db_connection()
+                        if upload_type == "Salary Computation":
+                            db_count = conn.execute(
+                                "SELECT COUNT(*) FROM employee_salary_monthly WHERE financial_year = ? AND salary_month = ?",
+                                (tax_year, salary_month),
+                            ).fetchone()[0]
+                            st.success(
+                                f"📊 **Verified:** {db_count} salary row(s) now stored for "
+                                f"{tax_year} / {salary_month}."
+                            )
+                        elif upload_type == "TDS Deduction":
+                            db_count = conn.execute(
+                                "SELECT COUNT(*) FROM employee_tds_monthly WHERE financial_year = ? AND salary_month = ?",
+                                (tax_year, salary_month),
+                            ).fetchone()[0]
+                            st.success(
+                                f"📊 **Verified:** {db_count} TDS row(s) now stored for "
+                                f"{tax_year} / {salary_month}."
+                            )
+                        elif upload_type == "PLI / Incentive":
+                            db_count = conn.execute(
+                                "SELECT COUNT(*) FROM employee_pli_monthly WHERE financial_year = ? AND salary_month = ?",
+                                (tax_year, salary_month),
+                            ).fetchone()[0]
+                            st.success(
+                                f"📊 **Verified:** {db_count} PLI row(s) now stored for "
+                                f"{tax_year} / {salary_month}."
+                            )
+                        else:
+                            db_count = conn.execute("SELECT COUNT(*) FROM employee_master").fetchone()[0]
+                            st.success(f"📊 **Verified:** {db_count} employees in master.")
+                        conn.close()
+                        st.info(
+                            "✅ Click **Payroll Data Preview** tab above to browse the imported data."
+                        )
+                    except Exception as ve:
+                        st.warning(f"Could not verify post-import count: {ve}")
 
         except Exception as e:
             st.error(f"Unable to process uploaded file: {e}")
