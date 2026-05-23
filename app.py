@@ -70,7 +70,7 @@ def image_to_base64(path):
     return ""
 
 LOGO_B64 = image_to_base64(LOGO_PATH)
-STRIDES_B64 = image_to_base64(STRIDES_PATH)
+STRIDES_B64 = image_to_base64(SARIKA_PATH)
 
 def img_html(b64, css_class="", style=""):
     if not b64:
