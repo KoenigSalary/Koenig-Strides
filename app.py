@@ -70,7 +70,7 @@ def image_to_base64(path):
     return ""
 
 LOGO_B64 = image_to_base64(LOGO_PATH)
-SARIKA_B64 = image_to_base64(SARIKA_PATH)
+STRIDES_B64 = image_to_base64(STRIDES_PATH)
 
 def img_html(b64, css_class="", style=""):
     if not b64:
@@ -890,24 +890,24 @@ def login_screen():
         opacity: 0.95;
         line-height: 1.4;
     }
-    .sarika-wrap {
+    .strides-wrap {
         text-align: center;
         margin: 4px auto 10px auto;
     }
-    .sarika-wrap img {
+    .strides-wrap img {
         width: 78px; height: 78px;
         border-radius: 50%;
         object-fit: cover;
         border: 3px solid #1471d8;
         box-shadow: 0 6px 16px rgba(15,23,42,.18);
     }
-    .sarika-caption {
+    .strides-caption {
         margin-top: 4px;
         font-weight: 800;
         color: #0b3ba7;
         font-size: 13px;
     }
-    .sarika-online {
+    .strides-online {
         color: #15803d;
         font-weight: 700;
         font-size: 11px;
@@ -964,7 +964,7 @@ def login_screen():
         .login-hero-card h2 { font-size: 16px; }
         .login-form-card { padding: 16px 14px; }
         .login-logo-wrap img { width: 140px; }
-        .sarika-wrap img { width: 68px; height: 68px; }
+        .strides-wrap img { width: 68px; height: 68px; }
     }
     </style>
     <div class='login-page-bg'></div>
@@ -4608,7 +4608,7 @@ except Exception as e:
 
 
 # =====================================================
-# VOICE SARIKA - NATIVE STREAMLIT AUDIO INPUT
+# VOICE STRIDES - NATIVE STREAMLIT AUDIO INPUT
 # =====================================================
 
 def transcribe_audio_with_openai(audio_bytes):
@@ -4617,7 +4617,7 @@ def transcribe_audio_with_openai(audio_bytes):
 
     try:
         audio_file = io.BytesIO(audio_bytes)
-        audio_file.name = "sarika_voice_input.wav"
+        audio_file.name = "strides_voice_input.wav"
 
         transcript = client.audio.transcriptions.create(
             model="whisper-1",
@@ -4625,7 +4625,7 @@ def transcribe_audio_with_openai(audio_bytes):
             language="en",
             prompt=(
                 "Indian English speaker. Common terms: HRA, NPS, Section 80C, "
-                "Form 16, Form 12B, Form 12BB, Sodexo, Koenig, Strides, Sarika, "
+                "Form 16, Form 12B, Form 12BB, Sodexo, Koenig, Strides, Strides, "
                 "SPOC, TDS, PAN, CTC, Rupees, lakh, crore."
             ),
         )
@@ -4662,9 +4662,9 @@ def speak_button_html(text, button_label="🔊 Speak Reply"):
     """
 
 
-def render_voice_sarika_panel():
-    st.markdown("### 🎙️ Voice Sarika")
-    st.caption("Record your question, then click **Transcribe & Ask Sarika**.")
+def render_voice_strides_panel():
+    st.markdown("### 🎙️ Voice Strides")
+    st.caption("Record your question, then click **Transcribe & Ask Strides**.")
 
     if client is None:
         st.warning("Voice transcription needs OPENAI_API_KEY in Streamlit Secrets.")
@@ -4678,15 +4678,15 @@ def render_voice_sarika_panel():
 
     audio_file = st.audio_input(
         "Record your question here",
-        key="sarika_native_audio_input"
+        key="strides_native_audio_input"
     )
 
     if audio_file is not None:
         audio_bytes = audio_file.getvalue()
         st.audio(audio_bytes, format="audio/wav")
 
-        if st.button("📝 Transcribe & Ask Sarika", use_container_width=True, key="voice_transcribe_ask_btn"):
-            with st.spinner("Sarika is listening and thinking..."):
+        if st.button("📝 Transcribe & Ask Strides", use_container_width=True, key="voice_transcribe_ask_btn"):
+            with st.spinner("Strides is listening and thinking..."):
                 transcript, err = transcribe_audio_with_openai(audio_bytes)
 
                 if err:
@@ -4937,10 +4937,10 @@ left, right = st.columns([1.05, 3.6], gap="large")
 
 with left:
     st.markdown("<div class='card' style='text-align:center;'>", unsafe_allow_html=True)
-    if SARIKA_B64:
-        st.markdown(img_html(SARIKA_B64, "avatar-img"), unsafe_allow_html=True)
-    st.markdown("<h3>👩‍💼 Sarika</h3>", unsafe_allow_html=True)
-    st.markdown("<div class='online'>● Sarika is online</div>", unsafe_allow_html=True)
+    if STRIDES_B64:
+        st.markdown(img_html(STRIDES_B64, "avatar-img"), unsafe_allow_html=True)
+    st.markdown("<h3>👩‍💼 Strides</h3>", unsafe_allow_html=True)
+    st.markdown("<div class='online'>● Strides is online</div>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown("### 📌 Panels")
@@ -4952,7 +4952,7 @@ with left:
     if st.session_state.get("start_completed", False):
         st.markdown("---")
         st.markdown("### 🤖 Assistant")
-        panel_button("💬 Ask Sarika", "Ask Sarika")
+        panel_button("💬 Ask Strides", "Ask Strides")
 
         st.markdown("---")
         st.markdown("### 🧾 Employee Tax")
@@ -4973,7 +4973,7 @@ with right:
     selected_panel = st.session_state.get("selected_panel", "Home")
 
     locked_panels = [
-        "Ask Sarika", "Employee Declaration", "My Tax Snapshot",
+        "Ask Strides", "Employee Declaration", "My Tax Snapshot",
         "Payroll Tax Engine", "Declaration Approval", "User Management",
         "Knowledge Base", "Admin Analytics"
     ]
@@ -4991,11 +4991,11 @@ with right:
         st.markdown("""
         <div class='hero' style='margin-top:24px;'>
             <h2>Welcome to Koenig Strides</h2>
-            <p>Select a panel from the left sidebar,<br>or use Ask Sarika to ask directly.</p>
+            <p>Select a panel from the left sidebar,<br>or use Ask Strides to ask directly.</p>
         </div>
         """, unsafe_allow_html=True)
         st.info(
-            "👉 Click **🚀 Start Here** in the left sidebar to unlock Ask Sarika, "
+            "👉 Click **🚀 Start Here** in the left sidebar to unlock Ask Strides, "
             "Employee Declarations, and (for Admins) the Payroll & Approval panels."
         )
 
@@ -5006,9 +5006,9 @@ with right:
     elif selected_panel == "Start Here":
         st.session_state.start_completed = True
         st.markdown("## 🚀 Start Here")
-        st.success("Assistant panels are now available in the left sidebar, including Ask Sarika.")
-        if st.button("💬 Open Ask Sarika", use_container_width=True):
-            st.session_state.selected_panel = "Ask Sarika"
+        st.success("Assistant panels are now available in the left sidebar, including Ask Strides.")
+        if st.button("💬 Open Ask Strides", use_container_width=True):
+            st.session_state.selected_panel = "Ask Strides"
             st.rerun()
         st.markdown("Select an area below, then choose a category and question.")
 
@@ -5107,22 +5107,22 @@ with right:
         render_employee_tax_summary_snapshot()
 
     # =====================================================
-    # ASK SARIKA PANEL
+    # ASK STRIDES PANEL
     # =====================================================
-    elif selected_panel == "Ask Sarika":
-        st.markdown("## 💬 Ask Sarika")
+    elif selected_panel == "Ask Strides":
+        st.markdown("## 💬 Ask Strides")
         st.markdown(
             "<div style='color:#64748b; font-size:13px; margin-top:-8px; margin-bottom:12px;'>"
-            "Chat with Sarika — your AI assistant for tax, salary, labour code, entity nexus and SPOC queries."
+            "Chat with Strides — your AI assistant for tax, salary, labour code, entity nexus and SPOC queries."
             "</div>",
             unsafe_allow_html=True
         )
 
-        with st.expander("🎙️ Voice Sarika (speak instead of typing)", expanded=False):
-            if "render_voice_sarika_panel" in globals():
-                render_voice_sarika_panel()
+        with st.expander("🎙️ Voice Strides (speak instead of typing)", expanded=False):
+            if "render_voice_strides_panel" in globals():
+                render_voice_strides_panel()
             else:
-                st.info("Voice Sarika is not available in this build. Please use the text box below.")
+                st.info("Voice Strides is not available in this build. Please use the text box below.")
 
         # ----- Chat history (newest at the bottom, like real chat apps) -----
         chat_container = st.container()
@@ -5131,7 +5131,7 @@ with right:
                 with st.chat_message("assistant", avatar="👩‍💼"):
                     st.markdown(
                         f"Hi **{st.session_state.employee_name}** 👋  \n"
-                        "I'm **Sarika**, your Koenig Strides assistant. "
+                        "I'm **Strides**, your Koenig Strides assistant. "
                         "Ask me anything about **Tax, Salary, Labour Code, Entity Nexus** or **SPOC routing**."
                     )
             else:
@@ -5163,14 +5163,14 @@ with right:
         # ----- Chat input at the bottom (widget-style, like ChatGPT/WhatsApp) -----
         user_query = st.chat_input("Type your question and press Enter… (e.g. What is NPS?)")
         if user_query and user_query.strip():
-            with st.spinner("Sarika is thinking…"):
+            with st.spinner("Strides is thinking…"):
                 submit_query(user_query.strip())
             st.rerun()
 
         if st.session_state.chat_history:
             col_clear, _ = st.columns([1, 4])
             with col_clear:
-                if st.button("🗑️ Clear chat", use_container_width=True, key="ask_sarika_clear"):
+                if st.button("🗑️ Clear chat", use_container_width=True, key="ask_Strides_clear"):
                     st.session_state.chat_history = []
                     st.rerun()
 
