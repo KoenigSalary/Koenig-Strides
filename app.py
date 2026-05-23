@@ -21,12 +21,12 @@ except Exception:
     AI_AVAILABLE = False
 
 # =====================================================
-# KOENIG STRIDE - POLISHED LOGIN UI + RESPONSIVE
+# KOENIG STRIDES - POLISHED LOGIN UI + RESPONSIVE
 # Streamlit-native layout, no broken HTML wrappers
 # =====================================================
 
 st.set_page_config(
-    page_title="Koenig Stride",
+    page_title="Koenig Strides",
     page_icon="🤖",
     layout="wide",
     initial_sidebar_state="collapsed"
@@ -37,7 +37,7 @@ EXCEL_PATH = BASE_DIR / "knowledge" / "Koenig_VoiceBot_FAQ_Master.xlsx"
 LOGO_PATH = BASE_DIR / "assets" / "koenig_logo.png"
 SARIKA_PATH = BASE_DIR / "assets" / "sarika.png"
 USERS_PATH = BASE_DIR / "users.csv"
-DB_PATH = BASE_DIR / "koenig_stride.db"
+DB_PATH = BASE_DIR / "koenig_Strides.db"
 PROOF_FOLDER = BASE_DIR / "proof_uploads"
 PROOF_FOLDER.mkdir(exist_ok=True)
 
@@ -983,12 +983,12 @@ def login_screen():
         else:
             st.markdown("<div class='login-logo-wrap'><h2 style='color:#04123d;'>KOENIG</h2></div>", unsafe_allow_html=True)
 
-        # 2. Koenig Stride title (under logo, brand-colored)
+        # 2. Koenig Strides title (under logo, brand-colored)
         st.markdown("""
         <div class='login-stack'>
             <div class='login-title-row'>
                 <div class='login-title-icon'>☻</div>
-                <h1 class='login-title-text'>Koenig Stride</h1>
+                <h1 class='login-title-text'>Koenig Strides</h1>
             </div>
             <div class='login-subtitle'>Tax &amp; Entity Nexus Assistant — Step Forward</div>
         </div>
@@ -997,7 +997,7 @@ def login_screen():
         # 3. Welcome hero (under title)
         st.markdown("""
         <div class='login-hero-card'>
-            <h2>Welcome to Koenig Stride</h2>
+            <h2>Welcome to Koenig Strides</h2>
             <p>Your secure internal assistant for tax, salary, entity and SPOC guidance.</p>
         </div>
         """, unsafe_allow_html=True)
@@ -1075,7 +1075,7 @@ def force_password_change_screen():
     with c2:
         st.markdown("<div class='card'>", unsafe_allow_html=True)
         st.markdown("## 🔐 Change Password Required")
-        st.info("For security, please change your default password before using Koenig Stride.")
+        st.info("For security, please change your default password before using Koenig Strides.")
         new_password = st.text_input("New Password", type="password")
         confirm_password = st.text_input("Confirm New Password", type="password")
         if st.button("Update Password", use_container_width=True):
@@ -1319,7 +1319,7 @@ def render_answer(row):
         email_html = f"<br><b>Email:</b> {email}" if email else ""
         st.markdown(f"<div class='protected-box'><b>🔒 Protected Information</b><br>This information is protected and cannot be displayed here.<br><br>Please contact the designated SPOC:<br><b>SPOC:</b> {spoc}{email_html}</div>", unsafe_allow_html=True)
     else:
-        st.markdown(f"<div class='answer-box'><b>Koenig Stride Answer:</b><br>{get_answer_text(row)}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='answer-box'><b>Koenig Strides Answer:</b><br>{get_answer_text(row)}</div>", unsafe_allow_html=True)
 
 # =====================================================
 # SEARCH
@@ -1404,7 +1404,7 @@ SPOC: {safe_get(row, 'SPOC Name')}
 Email: {safe_get(row, 'SPOC Email')}
 """
     prompt = f"""
-You are Koenig Stride, an internal Tax & Entity Nexus Assistant.
+You are Koenig Strides, an internal Tax & Entity Nexus Assistant.
 Use only the knowledge base below. Do not invent facts. If Protected is YES, do not reveal protected information and route employee to SPOC.
 
 Knowledge Base:
@@ -2445,7 +2445,7 @@ def render_payroll_upload_engine():
         st.download_button(
             label=f"📥 Download {upload_type} template (.xlsx)",
             data=template_bytes,
-            file_name=f"koenig_stride_{upload_type.lower().replace(' ', '_')}_template.xlsx",
+            file_name=f"koenig_strides_{upload_type.lower().replace(' ', '_')}_template.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
             key=f"tpl_dl_{upload_type}"
@@ -4521,7 +4521,7 @@ def delete_employee_master_record(employee_id):
 
 def render_employee_master_upload_panel():
     st.markdown("## 👥 Employee Master Upload")
-    st.caption("Upload or update employees for Koenig Stride payroll and tax computation.")
+    st.caption("Upload or update employees for Koenig Strides payroll and tax computation.")
     c1, c2 = st.columns(2)
     with c1:
         upload_month = month_selectbox("Upload Month", key="emp_master_upload_month")
@@ -4625,7 +4625,7 @@ def transcribe_audio_with_openai(audio_bytes):
             language="en",
             prompt=(
                 "Indian English speaker. Common terms: HRA, NPS, Section 80C, "
-                "Form 16, Form 12B, Form 12BB, Sodexo, Koenig, Stride, Sarika, "
+                "Form 16, Form 12B, Form 12BB, Sodexo, Koenig, Strides, Sarika, "
                 "SPOC, TDS, PAN, CTC, Rupees, lakh, crore."
             ),
         )
@@ -4873,7 +4873,7 @@ def render_admin_analytics_dashboard():
             st.download_button(
                 "⬇️ Download full audit log (.csv)",
                 audit_df.to_csv(index=False).encode("utf-8"),
-                file_name="koenig_stride_audit_log.csv",
+                file_name="koenig_strides_audit_log.csv",
                 mime="text/csv",
                 use_container_width=True,
             )
@@ -4912,7 +4912,7 @@ with top2:
     st.markdown("""
     <div class='brand-row'>
         <div class='bot-icon'>☻</div>
-        <h1 class='brand-title'>Koenig Stride</h1>
+        <h1 class='brand-title'>Koenig Strides</h1>
     </div>
     <div class='brand-subtitle'>Tax & Entity Nexus Assistant — Step Forward</div>
     """, unsafe_allow_html=True)
@@ -4990,7 +4990,7 @@ with right:
     if selected_panel == "Home":
         st.markdown("""
         <div class='hero' style='margin-top:24px;'>
-            <h2>Welcome to Koenig Stride</h2>
+            <h2>Welcome to Koenig Strides</h2>
             <p>Select a panel from the left sidebar,<br>or use Ask Sarika to ask directly.</p>
         </div>
         """, unsafe_allow_html=True)
@@ -5131,7 +5131,7 @@ with right:
                 with st.chat_message("assistant", avatar="👩‍💼"):
                     st.markdown(
                         f"Hi **{st.session_state.employee_name}** 👋  \n"
-                        "I'm **Sarika**, your Koenig Stride assistant. "
+                        "I'm **Sarika**, your Koenig Strides assistant. "
                         "Ask me anything about **Tax, Salary, Labour Code, Entity Nexus** or **SPOC routing**."
                     )
             else:
