@@ -38,11 +38,16 @@ st.set_page_config(
 #   ?embed=true                   → hide Streamlit chrome (header/footer/menu)
 #   ?panel=ask-strides            → deep-link to a specific panel after login
 #                                   (legacy alias ?panel=ask-sarika still works)
-#   ?user=<emp_id>&role=<r>       → RMS-issued identity (plain, dev mode)
-#   ?token=<signed_jwt>           → RMS-issued signed token (prod mode)
+#   ?email=<koenig email>         → RMS-issued email identity (plain, dev mode)
+#   ?user=<emp_id>&role=<r>       → legacy RMS-issued ID identity (plain, dev mode)
+#   ?token=<signed_jwt>           → RMS-issued signed token (prod mode, preferred)
 # In prod, the token is verified using RMS_SSO_SECRET in st.secrets.
+# Tokens MUST contain a `email` (preferred) or `user` claim, optional `name`/`role`.
+# Only `@koenig-solutions.com` email addresses are accepted.
 # If verification fails or token is absent, user falls through to normal login.
 # =====================================================
+
+ALLOWED_SSO_DOMAIN = "@koenig-solutions.com"
 
 try:
     _qp = dict(st.query_params)
@@ -54,17 +59,66 @@ except Exception:
 
 EMBED_MODE = str(_qp.get("embed", "")).lower() in ("1", "true", "yes")
 RMS_USER_PARAM = str(_qp.get("user", "")).strip()
+RMS_EMAIL_PARAM = str(_qp.get("email", "")).strip()
+RMS_NAME_PARAM = str(_qp.get("name", "")).strip()
 RMS_ROLE_PARAM = str(_qp.get("role", "")).strip()
 RMS_TOKEN_PARAM = str(_qp.get("token", "")).strip()
 DEEP_LINK_PANEL = str(_qp.get("panel", "")).strip()
+
+
+def _is_allowed_koenig_email(email):
+    """True if the email is non-empty and ends with @koenig-solutions.com."""
+    if not email:
+        return False
+    email = email.strip().lower()
+    return email.endswith(ALLOWED_SSO_DOMAIN) and "@" in email and len(email) > len(ALLOWED_SSO_DOMAIN)
+
+
+def _employee_id_from_email(email):
+    """praveen.chaudhary@koenig-solutions.com → 'praveen.chaudhary'.
+    Returns lower-case localpart, safe to use as a Strides user_id."""
+    if not email or "@" not in email:
+        return ""
+    return email.split("@", 1)[0].strip().lower()
+
+
+def _name_from_email(email):
+    """Derive a display name from an email.
+    praveen.chaudhary@koenig-solutions.com → 'Praveen Chaudhary'."""
+    local = _employee_id_from_email(email)
+    if not local:
+        return ""
+    parts = [p for p in local.replace("_", ".").replace("-", ".").split(".") if p]
+    return " ".join(p.capitalize() for p in parts) if parts else local
+
+
+def _is_admin_email(email):
+    """Check if an email is in the configured RMS_ADMIN_EMAILS list.
+    Accepts comma- or whitespace-separated emails in st.secrets."""
+    if not email:
+        return False
+    try:
+        raw = st.secrets.get("RMS_ADMIN_EMAILS", "")
+    except Exception:
+        raw = ""
+    if not raw:
+        return False
+    if isinstance(raw, (list, tuple)):
+        admin_set = {str(e).strip().lower() for e in raw if e}
+    else:
+        admin_set = {e.strip().lower() for e in re.split(r"[,\s]+", str(raw)) if e.strip()}
+    return email.strip().lower() in admin_set
 
 
 def _verify_rms_sso_token(token):
     """Verify an RMS-issued JWT and return the payload, or None if invalid.
 
     Expected payload shape:
-        {"user": "<emp_id>", "name": "<full_name>", "role": "Employee|Admin",
-         "exp": <unix_ts>}
+        {"email": "<koenig email>",   # preferred
+         "user":  "<emp_id>",         # legacy, optional
+         "name":  "<full_name>",
+         "role":  "Employee|Admin",
+         "exp":   <unix_ts>}
 
     Requires RMS_SSO_SECRET in st.secrets (HMAC-SHA256 shared secret with RMS).
     PyJWT is preferred; if not installed, a minimal HMAC verification fallback
@@ -1190,60 +1244,180 @@ def force_password_change_screen():
 
 # -----------------------------------------------------
 # RMS SSO auto-login (runs once per session if params present)
+#
+# Identity resolution priority:
+#   1. Signed JWT token (?token=...)  — production path
+#   2. Plain email param (?email=...) — dev/pilot only, gated by RMS_ALLOW_PLAIN_SSO
+#   3. Legacy user+role params         — dev/pilot only, gated by RMS_ALLOW_PLAIN_SSO
+#
+# Only @koenig-solutions.com emails are accepted.
+# First-time SSO users are auto-created in users.csv (linked to Employee Master
+# by email when possible).
 # -----------------------------------------------------
+
+
+def _link_or_create_sso_employee(email, display_name):
+    """Ensure the SSO user has a row in users.csv.
+
+    Strategy:
+      - Derive the internal user_id from the email localpart
+        (e.g. 'praveen.chaudhary' from 'praveen.chaudhary@koenig-solutions.com').
+      - If an Employee Master row exists with the same email, copy its
+        display name & department, AND keep the localpart as the user_id
+        (so future Strides records use a stable, human-readable ID).
+      - Insert a users.csv row with an unguessable random hash (SSO users
+        never need to type a password) and active=True.
+    """
+    email = (email or "").strip().lower()
+    if not _is_allowed_koenig_email(email):
+        return None, None
+
+    user_id = _employee_id_from_email(email)
+    pretty_name = (display_name or "").strip() or _name_from_email(email)
+
+    # Try to enrich from Employee Master (DB)
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT employee_id, employee_name FROM employee_master WHERE LOWER(email) = ? LIMIT 1",
+            (email,),
+        )
+        row = cur.fetchone()
+        conn.close()
+        if row:
+            # Keep the email-derived user_id (stable across uploads), but
+            # prefer the official name from Employee Master.
+            if row[1]:
+                pretty_name = row[1]
+    except Exception:
+        pass  # Employee Master may not exist yet on a fresh install
+
+    # Ensure users.csv row exists for this user_id
+    try:
+        df = load_users()
+        if user_id not in df["user_id"].astype(str).tolist():
+            # SSO users get an unguessable hash; they don't authenticate by password.
+            new_row = pd.DataFrame([{
+                "user_id": user_id,
+                "password_hash": hash_password(uuid.uuid4().hex + "-sso-only"),
+                "role": "Employee",
+                "first_login": "False",   # no password change required for SSO
+                "active": "True",
+                "display_name": pretty_name or user_id,
+            }])
+            df = pd.concat([df, new_row], ignore_index=True)
+            save_users(df)
+        else:
+            # Refresh display name if we learned a better one
+            idx = df[df["user_id"].astype(str) == user_id].index
+            if len(idx) and pretty_name and not df.loc[idx[0], "display_name"]:
+                df.loc[idx[0], "display_name"] = pretty_name
+                save_users(df)
+    except Exception:
+        pass
+
+    return user_id, pretty_name
+
+
 if not st.session_state.logged_in and not st.session_state.get("_rms_sso_tried"):
     st.session_state["_rms_sso_tried"] = True
-    _sso_user = None
+    _sso_email = None       # preferred identity
+    _sso_user = None        # legacy fallback identity
     _sso_name = None
     _sso_role = None
+    _sso_source = None      # "token" | "plain" — used for audit log
 
-    # Preferred: signed token
+    # 1. Preferred path: signed token
     if RMS_TOKEN_PARAM:
         _payload = _verify_rms_sso_token(RMS_TOKEN_PARAM)
         if _payload:
+            _sso_email = str(_payload.get("email", "")).strip().lower() or None
             _sso_user = str(_payload.get("user", "")).strip() or None
-            _sso_name = str(_payload.get("name", "")).strip() or _sso_user
-            _sso_role = str(_payload.get("role", "")).strip() or "Employee"
+            _sso_name = str(_payload.get("name", "")).strip() or None
+            _sso_role = str(_payload.get("role", "")).strip() or None
+            _sso_source = "token"
 
-    # Fallback (dev / pilot): plain user+role params — only honoured if
+    # 2/3. Fallback (dev / pilot): plain email or user param. Only honoured if
     # RMS_ALLOW_PLAIN_SSO is true in st.secrets (off by default for safety).
-    if not _sso_user and RMS_USER_PARAM:
+    if not (_sso_email or _sso_user):
         try:
             _allow_plain = str(st.secrets.get("RMS_ALLOW_PLAIN_SSO", "")).lower() in ("1", "true", "yes")
         except Exception:
             _allow_plain = False
         if _allow_plain:
-            _sso_user = RMS_USER_PARAM
-            _sso_name = RMS_USER_PARAM
-            _sso_role = RMS_ROLE_PARAM or "Employee"
+            if RMS_EMAIL_PARAM:
+                _sso_email = RMS_EMAIL_PARAM.strip().lower()
+                _sso_name = RMS_NAME_PARAM or None
+                _sso_role = RMS_ROLE_PARAM or None
+                _sso_source = "plain"
+            elif RMS_USER_PARAM:
+                _sso_user = RMS_USER_PARAM
+                _sso_name = RMS_NAME_PARAM or RMS_USER_PARAM
+                _sso_role = RMS_ROLE_PARAM or "Employee"
+                _sso_source = "plain"
 
-    if _sso_user:
+    # ---- Email-based SSO (primary path) ----
+    if _sso_email:
+        if not _is_allowed_koenig_email(_sso_email):
+            # Reject non-koenig domains silently — falls through to login screen.
+            try:
+                write_audit_log("SSO_REJECTED", target_id=_sso_email,
+                                details=f"reason=non_koenig_domain; source={_sso_source}")
+            except Exception:
+                pass
+        else:
+            _resolved_user_id, _resolved_name = _link_or_create_sso_employee(_sso_email, _sso_name)
+            if _resolved_user_id:
+                # Role: explicit Admin from token wins; else check admin-email list; else Employee.
+                _role = "Employee"
+                if _sso_role and _sso_role.strip().lower() == "admin":
+                    _role = "Admin"
+                elif _is_admin_email(_sso_email):
+                    _role = "Admin"
+
+                st.session_state.logged_in = True
+                st.session_state.role = _role
+                st.session_state.employee_id = _resolved_user_id
+                st.session_state.employee_name = _resolved_name or _resolved_user_id
+                st.session_state.employee_email = _sso_email
+                st.session_state.must_change_password = False
+                st.session_state.start_completed = True  # SSO users skip the start-here gate
+                try:
+                    write_audit_log("SSO_LOGIN", target_id=_sso_email,
+                                    details=f"role={_role}; source={_sso_source}")
+                except Exception:
+                    pass
+
+    # ---- Legacy ID-based SSO (kept for back-compat with older RMS tile URLs) ----
+    elif _sso_user:
+        ensure_employee_exists(_sso_user)
         st.session_state.logged_in = True
         st.session_state.role = _sso_role if _sso_role in ("Admin", "Employee") else "Employee"
         st.session_state.employee_id = _sso_user
         st.session_state.employee_name = _sso_name or _sso_user
         st.session_state.must_change_password = False
-        st.session_state.start_completed = True  # RMS users skip the start-here gate
-        # Optional: deep-link to a panel
-        if DEEP_LINK_PANEL:
-            _panel_map = {
-                "home": "Home",
-                "start-here": "Start Here",
-                "ask-strides": "Ask Strides",
-                "ask-sarika": "Ask Strides",  # legacy alias — keeps old RMS tile URLs working
-                "employee-declaration": "Employee Declaration",
-                "my-tax-snapshot": "My Tax Snapshot",
-                "payroll-tax-engine": "Payroll Tax Engine",
-                "declaration-approval": "Declaration Approval",
-                "user-management": "User Management",
-                "knowledge-base": "Knowledge Base",
-                "question-analytics": "Question Analytics",
-                "admin-analytics": "Admin Analytics",
-                "spoc": "SPOC",
-            }
-            _resolved = _panel_map.get(DEEP_LINK_PANEL.lower())
-            if _resolved:
-                st.session_state.selected_panel = _resolved
+        st.session_state.start_completed = True
+    # Optional: deep-link to a panel (applies if any SSO path succeeded)
+    if st.session_state.logged_in and DEEP_LINK_PANEL:
+        _panel_map = {
+            "home": "Home",
+            "start-here": "Start Here",
+            "ask-strides": "Ask Strides",
+            "ask-sarika": "Ask Strides",  # legacy alias — keeps old RMS tile URLs working
+            "employee-declaration": "Employee Declaration",
+            "my-tax-snapshot": "My Tax Snapshot",
+            "payroll-tax-engine": "Payroll Tax Engine",
+            "declaration-approval": "Declaration Approval",
+            "user-management": "User Management",
+            "knowledge-base": "Knowledge Base",
+            "question-analytics": "Question Analytics",
+            "admin-analytics": "Admin Analytics",
+            "spoc": "SPOC",
+        }
+        _resolved = _panel_map.get(DEEP_LINK_PANEL.lower())
+        if _resolved:
+            st.session_state.selected_panel = _resolved
 
 if not st.session_state.logged_in:
     login_screen()
