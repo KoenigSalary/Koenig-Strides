@@ -10,7 +10,6 @@ import uuid
 from datetime import datetime
 import sqlite3
 import numpy as np
-import streamlit.components.v1 as components
 
 try:
     from sentence_transformers import SentenceTransformer
@@ -21,23 +20,116 @@ except Exception:
     AI_AVAILABLE = False
 
 # =====================================================
-# KOENIG STRIDES - POLISHED LOGIN UI + RESPONSIVE
+# KOENIG STRIDE - POLISHED LOGIN UI + RESPONSIVE
 # Streamlit-native layout, no broken HTML wrappers
 # =====================================================
 
 st.set_page_config(
-    page_title="Koenig Strides",
+    page_title="Koenig Stride",
     page_icon="🤖",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
+
+# =====================================================
+# RMS EMBED / SSO LAYER
+# Allows Koenig-Stride to be embedded inside RMS as an external app.
+# Supports query params:
+#   ?embed=true                   → hide Streamlit chrome (header/footer/menu)
+#   ?panel=ask-strides            → deep-link to a specific panel after login
+#                                   (legacy alias ?panel=ask-sarika still works)
+#   ?user=<emp_id>&role=<r>       → RMS-issued identity (plain, dev mode)
+#   ?token=<signed_jwt>           → RMS-issued signed token (prod mode)
+# In prod, the token is verified using RMS_SSO_SECRET in st.secrets.
+# If verification fails or token is absent, user falls through to normal login.
+# =====================================================
+
+try:
+    _qp = dict(st.query_params)
+except Exception:
+    try:
+        _qp = {k: (v[0] if isinstance(v, list) and v else v) for k, v in st.experimental_get_query_params().items()}
+    except Exception:
+        _qp = {}
+
+EMBED_MODE = str(_qp.get("embed", "")).lower() in ("1", "true", "yes")
+RMS_USER_PARAM = str(_qp.get("user", "")).strip()
+RMS_ROLE_PARAM = str(_qp.get("role", "")).strip()
+RMS_TOKEN_PARAM = str(_qp.get("token", "")).strip()
+DEEP_LINK_PANEL = str(_qp.get("panel", "")).strip()
+
+
+def _verify_rms_sso_token(token):
+    """Verify an RMS-issued JWT and return the payload, or None if invalid.
+
+    Expected payload shape:
+        {"user": "<emp_id>", "name": "<full_name>", "role": "Employee|Admin",
+         "exp": <unix_ts>}
+
+    Requires RMS_SSO_SECRET in st.secrets (HMAC-SHA256 shared secret with RMS).
+    PyJWT is preferred; if not installed, a minimal HMAC verification fallback
+    keeps the app working without an extra dependency.
+    """
+    if not token:
+        return None
+    try:
+        secret = st.secrets.get("RMS_SSO_SECRET", "")
+    except Exception:
+        secret = ""
+    if not secret:
+        return None
+    try:
+        try:
+            import jwt  # type: ignore
+            return jwt.decode(token, secret, algorithms=["HS256"])
+        except ImportError:
+            # Minimal fallback: HS256 JWT verification using only stdlib
+            import hmac, json as _json
+            parts = token.split(".")
+            if len(parts) != 3:
+                return None
+            header_b64, payload_b64, sig_b64 = parts
+
+            def _b64url_decode(s):
+                pad = "=" * (-len(s) % 4)
+                return base64.urlsafe_b64decode(s + pad)
+
+            signing_input = f"{header_b64}.{payload_b64}".encode()
+            expected_sig = hmac.new(secret.encode(), signing_input, hashlib.sha256).digest()
+            actual_sig = _b64url_decode(sig_b64)
+            if not hmac.compare_digest(expected_sig, actual_sig):
+                return None
+            payload = _json.loads(_b64url_decode(payload_b64))
+            # Expiry check
+            if "exp" in payload:
+                import time as _time
+                if _time.time() > float(payload["exp"]):
+                    return None
+            return payload
+    except Exception:
+        return None
+
+
+# Hide Streamlit chrome when embedded
+if EMBED_MODE:
+    st.markdown(
+        """
+        <style>
+            #MainMenu, footer, header {visibility: hidden !important;}
+            .stApp [data-testid="stToolbar"] {display: none !important;}
+            .stApp [data-testid="stDecoration"] {display: none !important;}
+            .block-container {padding-top: 1rem !important;}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 BASE_DIR = Path(__file__).parent
 EXCEL_PATH = BASE_DIR / "knowledge" / "Koenig_VoiceBot_FAQ_Master.xlsx"
 LOGO_PATH = BASE_DIR / "assets" / "koenig_logo.png"
 SARIKA_PATH = BASE_DIR / "assets" / "sarika.png"
 USERS_PATH = BASE_DIR / "users.csv"
-DB_PATH = BASE_DIR / "koenig_Strides.db"
+DB_PATH = BASE_DIR / "koenig_stride.db"
 PROOF_FOLDER = BASE_DIR / "proof_uploads"
 PROOF_FOLDER.mkdir(exist_ok=True)
 
@@ -70,7 +162,7 @@ def image_to_base64(path):
     return ""
 
 LOGO_B64 = image_to_base64(LOGO_PATH)
-STRIDES_B64 = image_to_base64(SARIKA_PATH)
+SARIKA_B64 = image_to_base64(SARIKA_PATH)
 
 def img_html(b64, css_class="", style=""):
     if not b64:
@@ -890,24 +982,24 @@ def login_screen():
         opacity: 0.95;
         line-height: 1.4;
     }
-    .strides-wrap {
+    .sarika-wrap {
         text-align: center;
         margin: 4px auto 10px auto;
     }
-    .strides-wrap img {
+    .sarika-wrap img {
         width: 78px; height: 78px;
         border-radius: 50%;
         object-fit: cover;
         border: 3px solid #1471d8;
         box-shadow: 0 6px 16px rgba(15,23,42,.18);
     }
-    .strides-caption {
+    .sarika-caption {
         margin-top: 4px;
         font-weight: 800;
         color: #0b3ba7;
         font-size: 13px;
     }
-    .strides-online {
+    .sarika-online {
         color: #15803d;
         font-weight: 700;
         font-size: 11px;
@@ -964,7 +1056,7 @@ def login_screen():
         .login-hero-card h2 { font-size: 16px; }
         .login-form-card { padding: 16px 14px; }
         .login-logo-wrap img { width: 140px; }
-        .strides-wrap img { width: 68px; height: 68px; }
+        .sarika-wrap img { width: 68px; height: 68px; }
     }
     </style>
     <div class='login-page-bg'></div>
@@ -983,12 +1075,12 @@ def login_screen():
         else:
             st.markdown("<div class='login-logo-wrap'><h2 style='color:#04123d;'>KOENIG</h2></div>", unsafe_allow_html=True)
 
-        # 2. Koenig Strides title (under logo, brand-colored)
+        # 2. Koenig Stride title (under logo, brand-colored)
         st.markdown("""
         <div class='login-stack'>
             <div class='login-title-row'>
                 <div class='login-title-icon'>☻</div>
-                <h1 class='login-title-text'>Koenig Strides</h1>
+                <h1 class='login-title-text'>Koenig Stride</h1>
             </div>
             <div class='login-subtitle'>Tax &amp; Entity Nexus Assistant — Step Forward</div>
         </div>
@@ -997,7 +1089,7 @@ def login_screen():
         # 3. Welcome hero (under title)
         st.markdown("""
         <div class='login-hero-card'>
-            <h2>Welcome to Koenig Strides</h2>
+            <h2>Welcome to Koenig Stride</h2>
             <p>Your secure internal assistant for tax, salary, entity and SPOC guidance.</p>
         </div>
         """, unsafe_allow_html=True)
@@ -1075,7 +1167,7 @@ def force_password_change_screen():
     with c2:
         st.markdown("<div class='card'>", unsafe_allow_html=True)
         st.markdown("## 🔐 Change Password Required")
-        st.info("For security, please change your default password before using Koenig Strides.")
+        st.info("For security, please change your default password before using Koenig Stride.")
         new_password = st.text_input("New Password", type="password")
         confirm_password = st.text_input("Confirm New Password", type="password")
         if st.button("Update Password", use_container_width=True):
@@ -1095,6 +1187,63 @@ def force_password_change_screen():
                     st.success("Password updated successfully.")
                     st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
+
+# -----------------------------------------------------
+# RMS SSO auto-login (runs once per session if params present)
+# -----------------------------------------------------
+if not st.session_state.logged_in and not st.session_state.get("_rms_sso_tried"):
+    st.session_state["_rms_sso_tried"] = True
+    _sso_user = None
+    _sso_name = None
+    _sso_role = None
+
+    # Preferred: signed token
+    if RMS_TOKEN_PARAM:
+        _payload = _verify_rms_sso_token(RMS_TOKEN_PARAM)
+        if _payload:
+            _sso_user = str(_payload.get("user", "")).strip() or None
+            _sso_name = str(_payload.get("name", "")).strip() or _sso_user
+            _sso_role = str(_payload.get("role", "")).strip() or "Employee"
+
+    # Fallback (dev / pilot): plain user+role params — only honoured if
+    # RMS_ALLOW_PLAIN_SSO is true in st.secrets (off by default for safety).
+    if not _sso_user and RMS_USER_PARAM:
+        try:
+            _allow_plain = str(st.secrets.get("RMS_ALLOW_PLAIN_SSO", "")).lower() in ("1", "true", "yes")
+        except Exception:
+            _allow_plain = False
+        if _allow_plain:
+            _sso_user = RMS_USER_PARAM
+            _sso_name = RMS_USER_PARAM
+            _sso_role = RMS_ROLE_PARAM or "Employee"
+
+    if _sso_user:
+        st.session_state.logged_in = True
+        st.session_state.role = _sso_role if _sso_role in ("Admin", "Employee") else "Employee"
+        st.session_state.employee_id = _sso_user
+        st.session_state.employee_name = _sso_name or _sso_user
+        st.session_state.must_change_password = False
+        st.session_state.start_completed = True  # RMS users skip the start-here gate
+        # Optional: deep-link to a panel
+        if DEEP_LINK_PANEL:
+            _panel_map = {
+                "home": "Home",
+                "start-here": "Start Here",
+                "ask-strides": "Ask Strides",
+                "ask-sarika": "Ask Strides",  # legacy alias — keeps old RMS tile URLs working
+                "employee-declaration": "Employee Declaration",
+                "my-tax-snapshot": "My Tax Snapshot",
+                "payroll-tax-engine": "Payroll Tax Engine",
+                "declaration-approval": "Declaration Approval",
+                "user-management": "User Management",
+                "knowledge-base": "Knowledge Base",
+                "question-analytics": "Question Analytics",
+                "admin-analytics": "Admin Analytics",
+                "spoc": "SPOC",
+            }
+            _resolved = _panel_map.get(DEEP_LINK_PANEL.lower())
+            if _resolved:
+                st.session_state.selected_panel = _resolved
 
 if not st.session_state.logged_in:
     login_screen()
@@ -1319,7 +1468,7 @@ def render_answer(row):
         email_html = f"<br><b>Email:</b> {email}" if email else ""
         st.markdown(f"<div class='protected-box'><b>🔒 Protected Information</b><br>This information is protected and cannot be displayed here.<br><br>Please contact the designated SPOC:<br><b>SPOC:</b> {spoc}{email_html}</div>", unsafe_allow_html=True)
     else:
-        st.markdown(f"<div class='answer-box'><b>Koenig Strides Answer:</b><br>{get_answer_text(row)}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='answer-box'><b>Koenig Stride Answer:</b><br>{get_answer_text(row)}</div>", unsafe_allow_html=True)
 
 # =====================================================
 # SEARCH
@@ -1404,7 +1553,7 @@ SPOC: {safe_get(row, 'SPOC Name')}
 Email: {safe_get(row, 'SPOC Email')}
 """
     prompt = f"""
-You are Koenig Strides, an internal Tax & Entity Nexus Assistant.
+You are Koenig Stride, an internal Tax & Entity Nexus Assistant.
 Use only the knowledge base below. Do not invent facts. If Protected is YES, do not reveal protected information and route employee to SPOC.
 
 Knowledge Base:
@@ -1420,22 +1569,115 @@ Knowledge Base:
     except Exception:
         return get_answer_text(top)
 
+# -----------------------------------------------------
+# QUERY LOGGING (for Question Analytics admin panel)
+# Threshold above which a query is considered "matched / in record"
+QUERY_LOG_MATCH_THRESHOLD = 0.35  # below this → weak match / not in record
+QUERY_LOG_MIN_THRESHOLD = 0.15    # below this → no answer at all
+# -----------------------------------------------------
+
+
+def _ensure_query_log_table():
+    """Create the query_log table on first use (idempotent)."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS query_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                asked_at TEXT,
+                employee_id TEXT,
+                employee_name TEXT,
+                query TEXT,
+                matched INTEGER,           -- 1 if matched a FAQ, 0 otherwise
+                in_record INTEGER,         -- 1 if above MATCH threshold, 0 if weak/no match
+                matched_faq_id TEXT,
+                matched_category TEXT,
+                matched_question TEXT,
+                similarity REAL,
+                response_type TEXT,        -- 'answer' | 'protected' | 'not_found' | 'weak_match'
+                source TEXT
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_query_log_in_record ON query_log(in_record)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_query_log_asked_at ON query_log(asked_at)")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+def log_query(query, response_type, top_row=None, similarity=0.0):
+    """Record an Ask Strides query into query_log.
+
+    response_type: 'answer' | 'protected' | 'not_found' | 'weak_match'
+    top_row: best matching FAQ row (may be None)
+    similarity: cosine-similarity / keyword score
+    """
+    try:
+        _ensure_query_log_table()
+        sim = float(similarity or 0)
+        in_record = 1 if sim >= QUERY_LOG_MATCH_THRESHOLD and response_type in ("answer", "protected") else 0
+        matched = 1 if response_type in ("answer", "protected") else 0
+        faq_id = str(safe_get(top_row, "ID")) if top_row is not None else ""
+        cat = safe_get(top_row, "Category") if top_row is not None else ""
+        q_match = safe_get(top_row, "Question") if top_row is not None else ""
+        src = safe_get(top_row, "Source") if top_row is not None else ""
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO query_log (
+                asked_at, employee_id, employee_name, query,
+                matched, in_record, matched_faq_id, matched_category,
+                matched_question, similarity, response_type, source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            str(st.session_state.get("employee_id", "") or ""),
+            str(st.session_state.get("employee_name", "") or ""),
+            str(query)[:1000],
+            matched, in_record,
+            faq_id, cat, q_match,
+            sim, response_type, src,
+        ))
+        conn.commit()
+        conn.close()
+    except Exception:
+        # never break the chat flow because of logging
+        pass
+
+
 def submit_query(query):
     results = semantic_search(query)
     if results.empty:
         st.session_state.chat_history.append({"query":query,"type":"not_found","answer":"Knowledge base is not loaded.","similarity":0,"source":""})
+        log_query(query, "not_found", None, 0)
         return
     top = results.iloc[0]
     sim = float(top.get("similarity", 0))
-    if sim < 0.15:
+    if sim < QUERY_LOG_MIN_THRESHOLD:
         st.session_state.chat_history.append({"query":query,"type":"not_found","answer":"I could not find a relevant answer. Please try differently or contact the relevant SPOC.","similarity":sim,"source":safe_get(top,"Source")})
+        log_query(query, "not_found", top, sim)
+        return
+    if sim < QUERY_LOG_MATCH_THRESHOLD:
+        # Weak match — we still try to answer, but flag as 'not in record'
+        if is_protected(top):
+            spoc, email = get_spoc(top)
+            st.session_state.chat_history.append({"query":query,"type":"protected","answer":"This information is protected and cannot be displayed here.","spoc":spoc,"email":email,"similarity":sim,"source":safe_get(top,"Source")})
+            log_query(query, "weak_match", top, sim)
+            return
+        ans = generate_response(query, results)
+        st.session_state.chat_history.append({"query":query,"type":"answer","answer":ans,"similarity":sim,"source":safe_get(top,"Source")})
+        log_query(query, "weak_match", top, sim)
         return
     if is_protected(top):
         spoc, email = get_spoc(top)
         st.session_state.chat_history.append({"query":query,"type":"protected","answer":"This information is protected and cannot be displayed here.","spoc":spoc,"email":email,"similarity":sim,"source":safe_get(top,"Source")})
+        log_query(query, "protected", top, sim)
         return
     ans = generate_response(query, results)
     st.session_state.chat_history.append({"query":query,"type":"answer","answer":ans,"similarity":sim,"source":safe_get(top,"Source")})
+    log_query(query, "answer", top, sim)
 
 
 # =====================================================
@@ -1776,6 +2018,56 @@ def text_value(row, col):
         return ""
 
 
+def normalize_employee_id(value):
+    """Normalize Employee ID to a clean string.
+
+    Rules:
+    - NaN / None / blanks → ""
+    - Strip whitespace
+    - Strip trailing ".0" from floats read by pandas (e.g. 1086.0 → "1086")
+    - Strip leading zeros from purely numeric IDs (e.g. "00123" → "123")
+      (only if result is still non-empty; preserves "0" as "0")
+    - Preserves alphanumeric IDs as-is (e.g. "EMP-001" stays "EMP-001")
+    """
+    try:
+        if value is None:
+            return ""
+        if isinstance(value, float) and pd.isna(value):
+            return ""
+        # Handle numeric types (int/float) cleanly
+        if isinstance(value, float):
+            if value.is_integer():
+                return str(int(value))
+            return str(value).strip()
+        if isinstance(value, int):
+            return str(value)
+        s = str(value).strip()
+        if not s or s.lower() in ("nan", "none", "null"):
+            return ""
+        # Strip trailing ".0" pattern (e.g. "1086.0")
+        if s.endswith(".0"):
+            head = s[:-2]
+            if head.lstrip("-").isdigit():
+                s = head
+        # Strip leading zeros only for purely numeric strings, but keep "0"
+        if s.isdigit():
+            stripped = s.lstrip("0")
+            s = stripped if stripped else "0"
+        return s
+    except Exception:
+        return ""
+
+
+def employee_id_value(row, col):
+    """Read and normalize an Employee ID from a dataframe row."""
+    if not col:
+        return ""
+    try:
+        return normalize_employee_id(row.get(col, ""))
+    except Exception:
+        return ""
+
+
 def load_salary_structure_master():
     init_payroll_database()  # ensure table exists (no-op if already created)
     conn = get_db_connection()
@@ -2060,10 +2352,12 @@ def import_employee_master(df):
     conn = get_db_connection()
     cur = conn.cursor()
     count = 0
+    skipped = 0
 
     for _, row in df.iterrows():
-        employee_id = text_value(row, emp_id_col)
+        employee_id = employee_id_value(row, emp_id_col)
         if not employee_id:
+            skipped += 1
             continue
 
         cur.execute("""
@@ -2141,7 +2435,7 @@ def import_salary_monthly(df, tax_year, salary_month, mode):
     skipped = 0
 
     for _, row in df.iterrows():
-        employee_id = text_value(row, emp_id_col)
+        employee_id = employee_id_value(row, emp_id_col)
         if not employee_id:
             skipped += 1
             continue
@@ -2230,7 +2524,7 @@ def import_pli_monthly(df, tax_year, salary_month, mode):
     count = 0
     skipped = 0
     for _, row in df.iterrows():
-        employee_id = text_value(row, emp_id_col)
+        employee_id = employee_id_value(row, emp_id_col)
         if not employee_id:
             skipped += 1
             continue
@@ -2313,7 +2607,7 @@ def import_tds_monthly(df, tax_year, salary_month, mode):
     skipped = 0
 
     for _, row in df.iterrows():
-        employee_id = text_value(row, emp_id_col)
+        employee_id = employee_id_value(row, emp_id_col)
         if not employee_id:
             skipped += 1
             continue
@@ -2445,7 +2739,7 @@ def render_payroll_upload_engine():
         st.download_button(
             label=f"📥 Download {upload_type} template (.xlsx)",
             data=template_bytes,
-            file_name=f"koenig_strides_{upload_type.lower().replace(' ', '_')}_template.xlsx",
+            file_name=f"koenig_stride_{upload_type.lower().replace(' ', '_')}_template.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
             key=f"tpl_dl_{upload_type}"
@@ -2566,8 +2860,168 @@ def _apply_month_year_filter(df, year_val, month_val):
     return out
 
 
+# ----- Preview helpers: hide internal columns, prettify headers -----
+
+# Columns hidden from the user-facing preview (internal book-keeping)
+_HIDDEN_PREVIEW_COLS = {"id", "created_at", "updated_at"}
+
+# Map of raw DB column → pretty display label
+_PRETTY_PREVIEW_LABELS = {
+    "employee_id": "Employee ID",
+    "employee_name": "Employee Name",
+    "financial_year": "Tax Year",
+    "salary_month": "Month",
+    "tax_regime": "Tax Regime",
+    "pan_no": "PAN No.",
+    "date_of_joining": "Date of Joining",
+    "doj": "Date of Joining",
+    "date_of_exit": "Date of Exit",
+    "doe": "Date of Exit",
+    "dob": "DOB",
+    "gender": "Gender",
+    "designation": "Designation",
+    "department": "Department",
+    "branch": "Branch",
+    "annual_salary": "Annual Salary",
+    "monthly_salary": "Monthly Salary",
+    "basic_percent": "Basic %",
+    "upload_month": "Upload Month",
+    "tax_year": "Tax Year",
+    "status": "Status",
+    "gross_salary": "Gross Salary",
+    "basic": "Basic",
+    "hra": "HRA",
+    "sodexo_meal_passes": "Meal Passes / Sodexo",
+    "telephone_internet": "Telephone / Internet",
+    "electricity_reimbursement": "Electricity Reimbursement",
+    "professional_software": "Professional / Software",
+    "skill_development": "Skill Development",
+    "power_utility_allowance": "Power & Utility Allowance",
+    "taxable_allowance": "Taxable Allowance",
+    "ot_pli_profit_sharing": "OT / PLI / Profit Sharing",
+    "exgratia": "Ex-Gratia",
+    "gratuity": "Gratuity",
+    "severance": "Severance",
+    "leave_encashment": "Leave Encashment",
+    "referral_bonus": "Referral Bonus",
+    "other_adjustment": "Other Adjustment",
+    "total_income_from_salary": "Total Income from Salary",
+    "pli_amount": "PLI Amount",
+    "incentive_amount": "Incentive",
+    "performance_bonus": "Performance Bonus",
+    "profit_sharing": "Profit Sharing",
+    "other_variable_pay": "Other Variable Pay",
+    "total_variable_pay": "Total Variable Pay",
+    "remarks": "Remarks",
+    "tds_deducted": "TDS Deducted",
+    "tax1": "Tax1",
+    "tax2": "Tax2",
+    "tax3": "Tax3",
+    "tax4": "Tax4",
+    "tax5": "Tax5",
+    "uploaded_at": "Uploaded At",
+    "computed_at": "Computed At",
+    "email": "Email",
+}
+
+
+def prettify_preview_df(df, drop_cols=None):
+    """Hide internal columns and rename DB column names to human labels.
+
+    Used by the Payroll Data Preview tabs. Returns a *new* DataFrame; the
+    original is left untouched (so downstream CSV exports still get full data).
+    """
+    if df is None or df.empty:
+        return df
+    cols_to_drop = set(_HIDDEN_PREVIEW_COLS)
+    if drop_cols:
+        cols_to_drop.update(drop_cols)
+    keep = [c for c in df.columns if c not in cols_to_drop]
+    out = df[keep].copy()
+    out.rename(columns=_PRETTY_PREVIEW_LABELS, inplace=True)
+    return out
+
+
+def cleanup_employee_master_ids():
+    """One-time cleanup: normalize Employee IDs and deduplicate records.
+
+    Strategy:
+    1. Load all employee_master rows.
+    2. Compute normalized employee_id for each row.
+    3. Group by normalized ID; keep the row with the *latest* uploaded_at
+       (fallback: highest id) and discard the others.
+    4. Rewrite the table with normalized IDs.
+
+    Returns a dict with counts: {normalized, removed, total_before, total_after}
+    """
+    init_payroll_database()
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT id, employee_id, uploaded_at FROM employee_master")
+        rows = cur.fetchall()
+    except Exception as exc:
+        conn.close()
+        return {"error": str(exc)}
+
+    total_before = len(rows)
+    # group by normalized id
+    groups = {}
+    for row_id, emp_id, uploaded_at in rows:
+        norm = normalize_employee_id(emp_id)
+        if not norm:
+            # blank/invalid → mark for deletion
+            groups.setdefault("__blank__", []).append((row_id, emp_id, uploaded_at))
+            continue
+        groups.setdefault(norm, []).append((row_id, emp_id, uploaded_at))
+
+    keep_ids, delete_ids, normalize_ops = [], [], []
+    for norm, entries in groups.items():
+        if norm == "__blank__":
+            delete_ids.extend(e[0] for e in entries)
+            continue
+        # pick the most recent
+        entries_sorted = sorted(entries, key=lambda e: (e[2] or "", e[0]), reverse=True)
+        winner = entries_sorted[0]
+        losers = entries_sorted[1:]
+        keep_ids.append(winner[0])
+        delete_ids.extend(e[0] for e in losers)
+        # if the winner's raw emp_id != normalized, queue an UPDATE
+        if winner[1] != norm:
+            normalize_ops.append((norm, winner[0]))
+
+    # apply deletes
+    for row_id in delete_ids:
+        try:
+            cur.execute("DELETE FROM employee_master WHERE id = ?", (row_id,))
+        except Exception:
+            pass
+
+    # apply normalizations (skip duplicates that would violate UNIQUE)
+    for norm, row_id in normalize_ops:
+        try:
+            cur.execute("UPDATE employee_master SET employee_id = ? WHERE id = ?", (norm, row_id))
+        except Exception:
+            # another row may already own the normalized ID — drop this one
+            cur.execute("DELETE FROM employee_master WHERE id = ?", (row_id,))
+            delete_ids.append(row_id)
+
+    conn.commit()
+    cur.execute("SELECT COUNT(*) FROM employee_master")
+    total_after = cur.fetchone()[0]
+    conn.close()
+
+    return {
+        "total_before": total_before,
+        "total_after": total_after,
+        "removed": total_before - total_after,
+        "normalized": len(normalize_ops),
+    }
+
+
 def render_payroll_data_preview():
     st.markdown("### 📊 Payroll Data Preview")
+    st.caption("Internal columns (`id`, timestamps) are hidden for readability. Use the cleanup button below to fix duplicate / float Employee IDs.")
 
     init_payroll_database()  # ensure tables exist (no-op if already created)
     conn = get_db_connection()
@@ -2578,9 +3032,27 @@ def render_payroll_data_preview():
 
     with tab1:
         df = pd.read_sql_query("SELECT * FROM employee_master ORDER BY employee_id", conn)
-        st.dataframe(df, use_container_width=True)
+        st.dataframe(prettify_preview_df(df), use_container_width=True, hide_index=True)
         if not df.empty:
             st.caption(f"{len(df)} record(s)")
+
+        # Cleanup tool
+        with st.expander("🧹 Clean Up Employee Master (normalize IDs & remove duplicates)"):
+            st.caption(
+                "Strips trailing `.0` (e.g. `1086.0` → `1086`), removes leading zeros, "
+                "and merges duplicates (keeps the most recently uploaded copy)."
+            )
+            if st.button("Run Cleanup Now", key="emp_master_cleanup_btn"):
+                result = cleanup_employee_master_ids()
+                if "error" in result:
+                    st.error(f"Cleanup failed: {result['error']}")
+                else:
+                    st.success(
+                        f"✅ Cleanup complete. Before: {result['total_before']} rows · "
+                        f"After: {result['total_after']} rows · "
+                        f"Removed: {result['removed']} · Normalized: {result['normalized']}"
+                    )
+                    st.rerun()
 
     with tab2:
         df = pd.read_sql_query(
@@ -2601,7 +3073,7 @@ def render_payroll_data_preview():
                     "Month", ["All"] + FY_MONTHS, index=0, key="prev_salary_month"
                 )
             filtered = _apply_month_year_filter(df, year_filter, month_filter)
-            st.dataframe(filtered, use_container_width=True)
+            st.dataframe(prettify_preview_df(filtered), use_container_width=True, hide_index=True)
             st.caption(f"{len(filtered)} record(s) of {len(df)} total")
 
     with tab_pli:
@@ -2633,7 +3105,7 @@ def render_payroll_data_preview():
                     "Month", ["All"] + FY_MONTHS, index=0, key="prev_pli_month"
                 )
             filtered = _apply_month_year_filter(df_pli, year_filter, month_filter)
-            st.dataframe(filtered, use_container_width=True)
+            st.dataframe(prettify_preview_df(filtered), use_container_width=True, hide_index=True)
             st.caption(f"{len(filtered)} record(s) of {len(df_pli)} total")
 
     with tab3:
@@ -2655,7 +3127,7 @@ def render_payroll_data_preview():
                     "Month", ["All"] + FY_MONTHS, index=0, key="prev_tds_month"
                 )
             filtered = _apply_month_year_filter(df, year_filter, month_filter)
-            st.dataframe(filtered, use_container_width=True)
+            st.dataframe(prettify_preview_df(filtered), use_container_width=True, hide_index=True)
             st.caption(f"{len(filtered)} record(s) of {len(df)} total")
 
     with tab4:
@@ -2663,7 +3135,7 @@ def render_payroll_data_preview():
             "SELECT * FROM employee_tax_computation ORDER BY computed_at DESC, employee_id",
             conn,
         )
-        st.dataframe(df, use_container_width=True)
+        st.dataframe(prettify_preview_df(df), use_container_width=True, hide_index=True)
         if not df.empty:
             st.caption(f"{len(df)} record(s)")
 
@@ -4405,7 +4877,7 @@ def upload_employee_master(df, upload_month, tax_year):
     cur = conn.cursor()
     for idx, row in df.iterrows():
         try:
-            employee_id = str(row.get("EmployeeID", "")).strip()
+            employee_id = normalize_employee_id(row.get("EmployeeID", ""))
             if not employee_id:
                 errors.append(f"Row {idx + 2}: Missing Employee ID")
                 continue
@@ -4521,7 +4993,7 @@ def delete_employee_master_record(employee_id):
 
 def render_employee_master_upload_panel():
     st.markdown("## 👥 Employee Master Upload")
-    st.caption("Upload or update employees for Koenig Strides payroll and tax computation.")
+    st.caption("Upload or update employees for Koenig Stride payroll and tax computation.")
     c1, c2 = st.columns(2)
     with c1:
         upload_month = month_selectbox("Upload Month", key="emp_master_upload_month")
@@ -4608,16 +5080,23 @@ except Exception as e:
 
 
 # =====================================================
-# VOICE STRIDES - NATIVE STREAMLIT AUDIO INPUT
+# VOICE FEATURES REMOVED (per user request, May 2026)
+# Voice recording / TTS / speak buttons were taken out so Strides is
+# text-only. The helper below is kept as a stub so any lingering reference
+# (e.g., from cached session state) does not crash.
 # =====================================================
 
-def transcribe_audio_with_openai(audio_bytes):
+def _voice_disabled_stub(*args, **kwargs):  # pragma: no cover - safety stub
+    return None
+
+
+def _unused_transcribe_audio_with_openai(audio_bytes):
     if client is None:
         return "", "OpenAI API key not available. Please add OPENAI_API_KEY in Streamlit Secrets."
 
     try:
         audio_file = io.BytesIO(audio_bytes)
-        audio_file.name = "strides_voice_input.wav"
+        audio_file.name = "sarika_voice_input.wav"
 
         transcript = client.audio.transcriptions.create(
             model="whisper-1",
@@ -4625,7 +5104,7 @@ def transcribe_audio_with_openai(audio_bytes):
             language="en",
             prompt=(
                 "Indian English speaker. Common terms: HRA, NPS, Section 80C, "
-                "Form 16, Form 12B, Form 12BB, Sodexo, Koenig, Strides, Strides, "
+                "Form 16, Form 12B, Form 12BB, Sodexo, Koenig, Stride, Strides, "
                 "SPOC, TDS, PAN, CTC, Rupees, lakh, crore."
             ),
         )
@@ -4636,7 +5115,7 @@ def transcribe_audio_with_openai(audio_bytes):
         return "", str(e)
 
 
-def speak_button_html(text, button_label="🔊 Speak Reply"):
+def _unused_speak_button_html(text, button_label="🔊 Speak Reply"):
     safe_text = html.escape(str(text)).replace("\\n", " ")
 
     return f"""
@@ -4662,8 +5141,8 @@ def speak_button_html(text, button_label="🔊 Speak Reply"):
     """
 
 
-def render_voice_strides_panel():
-    st.markdown("### 🎙️ Voice Strides")
+def _unused_render_voice_sarika_panel():
+    st.markdown("### 🎙️ Voice Assistant")
     st.caption("Record your question, then click **Transcribe & Ask Strides**.")
 
     if client is None:
@@ -4678,7 +5157,7 @@ def render_voice_strides_panel():
 
     audio_file = st.audio_input(
         "Record your question here",
-        key="strides_native_audio_input"
+        key="sarika_native_audio_input"
     )
 
     if audio_file is not None:
@@ -4698,18 +5177,209 @@ def render_voice_strides_panel():
                     submit_query(transcript.strip())
                     st.rerun()
 
-    if st.session_state.chat_history:
-        latest = st.session_state.chat_history[-1]
-        if latest.get("type") == "answer":
-            components.html(
-                speak_button_html(latest.get("answer", ""), "🔊 Speak Latest Reply"),
-                height=60
-            )
+    # Voice TTS removed — stub left intentionally empty.
+    return
 
 
 # =====================================================
 # ADMIN ANALYTICS DASHBOARD
 # =====================================================
+
+def render_question_analytics():
+    """Admin panel: shows what employees ask Strides, what's in record vs not."""
+    st.markdown("## 📊 Question Analytics")
+    st.caption(
+                "Every question asked in **Ask Strides** is logged here. Use this view to see what's well-covered "
+        "by the FAQ knowledge base and what topics need new FAQ rows."
+    )
+
+    _ensure_query_log_table()
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        df = pd.read_sql_query(
+            "SELECT * FROM query_log ORDER BY asked_at DESC",
+            conn,
+        )
+        conn.close()
+    except Exception as e:
+        st.error(f"Could not load query log: {e}")
+        return
+
+    if df.empty:
+        st.info("No questions have been asked yet. Once employees use Ask Strides, their queries will appear here.")
+        return
+
+    # ---- Date range filter ----
+    fc1, fc2, fc3 = st.columns([1, 1, 2])
+    with fc1:
+        date_window = st.selectbox(
+            "Time window",
+            ["Last 7 days", "Last 30 days", "Last 90 days", "All time"],
+            index=1,
+            key="qlog_window",
+        )
+    days_map = {"Last 7 days": 7, "Last 30 days": 30, "Last 90 days": 90, "All time": None}
+    days = days_map[date_window]
+    if days:
+        cutoff = (datetime.now() - pd.Timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+        df_f = df[df["asked_at"] >= cutoff].copy()
+    else:
+        df_f = df.copy()
+
+    with fc2:
+        view_mode = st.selectbox(
+            "Show",
+            ["All queries", "In record only", "Not in record only"],
+            key="qlog_view",
+        )
+    if view_mode == "In record only":
+        df_v = df_f[df_f["in_record"] == 1]
+    elif view_mode == "Not in record only":
+        df_v = df_f[df_f["in_record"] == 0]
+    else:
+        df_v = df_f
+
+    # ---- KPI cards ----
+    total = len(df_f)
+    in_rec = int(df_f["in_record"].sum())
+    not_in_rec = total - in_rec
+    pct = (in_rec / total * 100) if total else 0
+    unique_q = df_f["query"].str.lower().str.strip().nunique()
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Total questions", f"{total:,}")
+    k2.metric("In record (FAQ match)", f"{in_rec:,}", f"{pct:.1f}%")
+    k3.metric("Not in record", f"{not_in_rec:,}", f"{100-pct:.1f}%" if total else "0%")
+    k4.metric("Unique questions", f"{unique_q:,}")
+
+    st.markdown("---")
+
+    # ---- Daily volume chart ----
+    if total and days:
+        df_daily = df_f.copy()
+        df_daily["date"] = pd.to_datetime(df_daily["asked_at"], errors="coerce").dt.date
+        chart_df = (
+            df_daily.groupby("date")
+            .agg(in_record=("in_record", "sum"), total=("id", "count"))
+            .reset_index()
+        )
+        chart_df["not_in_record"] = chart_df["total"] - chart_df["in_record"]
+        chart_df = chart_df.set_index("date")[["in_record", "not_in_record"]]
+        st.markdown("### 📈 Daily volume")
+        st.bar_chart(chart_df, height=220)
+
+    # ---- Top matched FAQs ----
+    cA, cB = st.columns(2)
+    with cA:
+        st.markdown("### 🏆 Top FAQs answered")
+        top_faqs = (
+            df_f[df_f["in_record"] == 1]
+            .groupby(["matched_faq_id", "matched_category", "matched_question"], dropna=False)
+            .size().reset_index(name="hits")
+            .sort_values("hits", ascending=False)
+            .head(15)
+            .rename(columns={
+                "matched_faq_id": "FAQ ID",
+                "matched_category": "Category",
+                "matched_question": "Question",
+                "hits": "Hits",
+            })
+        )
+        if top_faqs.empty:
+            st.info("No in-record matches yet in this window.")
+        else:
+            st.dataframe(top_faqs, hide_index=True, use_container_width=True)
+
+    with cB:
+        st.markdown("### 📊 Category coverage")
+        cat_df = (
+            df_f[df_f["in_record"] == 1]
+            .groupby("matched_category")
+            .size().reset_index(name="hits")
+            .sort_values("hits", ascending=False)
+            .rename(columns={"matched_category": "Category", "hits": "Hits"})
+        )
+        if cat_df.empty:
+            st.info("No category data yet.")
+        else:
+            st.dataframe(cat_df, hide_index=True, use_container_width=True)
+
+    st.markdown("---")
+
+    # ---- Not in record (the actionable list) ----
+    st.markdown("### ❗ Questions NOT in record (future FAQ candidates)")
+    st.caption(
+        "These are questions where Strides could not find a confident FAQ match. "
+        "Review them, decide which to convert into new FAQ entries, and add to **Salary & Tax FAQs**."
+    )
+
+    gap_df = df_f[df_f["in_record"] == 0].copy()
+    if gap_df.empty:
+        st.success("🎉 Every question in this window was answered from the FAQ base — no gaps to fix.")
+    else:
+        # group near-duplicates by lower-cased query text
+        gap_df["q_norm"] = gap_df["query"].astype(str).str.lower().str.strip()
+        grouped = (
+            gap_df.groupby("q_norm")
+            .agg(
+                Times_Asked=("id", "count"),
+                Sample_Question=("query", "first"),
+                Last_Asked=("asked_at", "max"),
+                Avg_Similarity=("similarity", "mean"),
+                Last_Response_Type=("response_type", "last"),
+            )
+            .reset_index(drop=True)
+            .sort_values(["Times_Asked", "Last_Asked"], ascending=[False, False])
+        )
+        grouped["Avg_Similarity"] = grouped["Avg_Similarity"].round(3)
+        st.dataframe(grouped, hide_index=True, use_container_width=True)
+
+        # CSV download for FAQ team
+        csv_bytes = grouped.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "⬇️ Download as CSV (for FAQ team)",
+            data=csv_bytes,
+            file_name=f"strides_unanswered_questions_{datetime.now().strftime('%Y%m%d')}.csv",
+            mime="text/csv",
+        )
+
+    st.markdown("---")
+
+    # ---- Raw log (collapsed) ----
+    with st.expander("📜 Raw query log (latest 200 rows)"):
+        display_cols = [
+            "asked_at", "employee_id", "employee_name", "query",
+            "in_record", "response_type", "similarity",
+            "matched_faq_id", "matched_category", "matched_question",
+        ]
+        existing = [c for c in display_cols if c in df_v.columns]
+        st.dataframe(df_v[existing].head(200), hide_index=True, use_container_width=True)
+
+        # Maintenance
+        st.markdown("---")
+        st.caption("Maintenance")
+        c1, c2 = st.columns(2)
+        with c1:
+            full_csv = df_v.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "⬇️ Download full filtered log (CSV)",
+                data=full_csv,
+                file_name=f"strides_query_log_{datetime.now().strftime('%Y%m%d')}.csv",
+                mime="text/csv",
+            )
+        with c2:
+            if st.button("🗑️ Clear query log (irreversible)", key="qlog_clear"):
+                try:
+                    conn = sqlite3.connect(DB_PATH)
+                    cur = conn.cursor()
+                    cur.execute("DELETE FROM query_log")
+                    conn.commit()
+                    conn.close()
+                    st.success("Query log cleared.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Could not clear log: {e}")
+
 
 def render_admin_analytics_dashboard():
     """High-level admin analytics: users, declarations, knowledge, payroll."""
@@ -4873,7 +5543,7 @@ def render_admin_analytics_dashboard():
             st.download_button(
                 "⬇️ Download full audit log (.csv)",
                 audit_df.to_csv(index=False).encode("utf-8"),
-                file_name="koenig_strides_audit_log.csv",
+                file_name="koenig_stride_audit_log.csv",
                 mime="text/csv",
                 use_container_width=True,
             )
@@ -4912,7 +5582,7 @@ with top2:
     st.markdown("""
     <div class='brand-row'>
         <div class='bot-icon'>☻</div>
-        <h1 class='brand-title'>Koenig Strides</h1>
+        <h1 class='brand-title'>Koenig Stride</h1>
     </div>
     <div class='brand-subtitle'>Tax & Entity Nexus Assistant — Step Forward</div>
     """, unsafe_allow_html=True)
@@ -4937,8 +5607,8 @@ left, right = st.columns([1.05, 3.6], gap="large")
 
 with left:
     st.markdown("<div class='card' style='text-align:center;'>", unsafe_allow_html=True)
-    if STRIDES_B64:
-        st.markdown(img_html(STRIDES_B64, "avatar-img"), unsafe_allow_html=True)
+    if SARIKA_B64:
+        st.markdown(img_html(SARIKA_B64, "avatar-img"), unsafe_allow_html=True)
     st.markdown("<h3>👩‍💼 Strides</h3>", unsafe_allow_html=True)
     st.markdown("<div class='online'>● Strides is online</div>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
@@ -4967,6 +5637,7 @@ with left:
             panel_button("✅ Declaration Approval", "Declaration Approval")
             panel_button("👥 User Management", "User Management")
             panel_button("📚 Knowledge Base", "Knowledge Base")
+            panel_button("📊 Question Analytics", "Question Analytics")
             panel_button("📈 Admin Analytics", "Admin Analytics")
 
 with right:
@@ -4975,7 +5646,7 @@ with right:
     locked_panels = [
         "Ask Strides", "Employee Declaration", "My Tax Snapshot",
         "Payroll Tax Engine", "Declaration Approval", "User Management",
-        "Knowledge Base", "Admin Analytics"
+        "Knowledge Base", "Question Analytics", "Admin Analytics"
     ]
 
     if selected_panel in locked_panels and not st.session_state.get("start_completed", False):
@@ -4990,7 +5661,7 @@ with right:
     if selected_panel == "Home":
         st.markdown("""
         <div class='hero' style='margin-top:24px;'>
-            <h2>Welcome to Koenig Strides</h2>
+            <h2>Welcome to Koenig Stride</h2>
             <p>Select a panel from the left sidebar,<br>or use Ask Strides to ask directly.</p>
         </div>
         """, unsafe_allow_html=True)
@@ -5107,9 +5778,9 @@ with right:
         render_employee_tax_summary_snapshot()
 
     # =====================================================
-    # ASK STRIDES PANEL
+    # ASK STRIDES PANEL (formerly Ask Sarika)
     # =====================================================
-    elif selected_panel == "Ask Strides":
+    elif selected_panel in ("Ask Strides", "Ask Sarika"):  # legacy panel name supported
         st.markdown("## 💬 Ask Strides")
         st.markdown(
             "<div style='color:#64748b; font-size:13px; margin-top:-8px; margin-bottom:12px;'>"
@@ -5118,12 +5789,6 @@ with right:
             unsafe_allow_html=True
         )
 
-        with st.expander("🎙️ Voice Strides (speak instead of typing)", expanded=False):
-            if "render_voice_strides_panel" in globals():
-                render_voice_strides_panel()
-            else:
-                st.info("Voice Strides is not available in this build. Please use the text box below.")
-
         # ----- Chat history (newest at the bottom, like real chat apps) -----
         chat_container = st.container()
         with chat_container:
@@ -5131,7 +5796,7 @@ with right:
                 with st.chat_message("assistant", avatar="👩‍💼"):
                     st.markdown(
                         f"Hi **{st.session_state.employee_name}** 👋  \n"
-                        "I'm **Strides**, your Koenig Strides assistant. "
+                        "I'm **Strides**, your Koenig Stride assistant. "
                         "Ask me anything about **Tax, Salary, Labour Code, Entity Nexus** or **SPOC routing**."
                     )
             else:
@@ -5170,7 +5835,7 @@ with right:
         if st.session_state.chat_history:
             col_clear, _ = st.columns([1, 4])
             with col_clear:
-                if st.button("🗑️ Clear chat", use_container_width=True, key="ask_Strides_clear"):
+                if st.button("🗑️ Clear chat", use_container_width=True, key="ask_strides_clear"):
                     st.session_state.chat_history = []
                     st.rerun()
 
@@ -5212,6 +5877,9 @@ with right:
             st.dataframe(faq_df[cols], use_container_width=True)
         else:
             st.warning("No knowledge records loaded.")
+
+    elif selected_panel == "Question Analytics" and st.session_state.role == "Admin":
+        render_question_analytics()
 
     elif selected_panel == "Admin Analytics" and st.session_state.role == "Admin":
         render_admin_analytics_dashboard()
