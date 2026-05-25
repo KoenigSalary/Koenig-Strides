@@ -1816,7 +1816,347 @@ def log_query(query, response_type, top_row=None, similarity=0.0):
         pass
 
 
+# -----------------------------------------------------
+# LIVE TAX CALCULATOR (intercepts numeric salary questions before FAQ search)
+# -----------------------------------------------------
+
+# FY 2026-27 slabs — must match the values used elsewhere in the app.
+TAX_CALC_NEW_SLABS = [
+    (400000, 0.00), (800000, 0.05), (1200000, 0.10),
+    (1600000, 0.15), (2000000, 0.20), (2400000, 0.25),
+    (float("inf"), 0.30),
+]
+TAX_CALC_OLD_SLABS = [
+    (250000, 0.00), (500000, 0.05),
+    (1000000, 0.20), (float("inf"), 0.30),
+]
+TAX_CALC_NEW_STD_DED   = 75000
+TAX_CALC_OLD_STD_DED   = 50000
+TAX_CALC_CESS          = 0.04
+TAX_CALC_NEW_REBATE_UP = 1200000   # 87A under new regime: nil up to ₹12L taxable
+TAX_CALC_OLD_REBATE_UP = 500000    # 87A under old regime: nil up to ₹5L taxable
+
+
+def _parse_amount_with_unit(num_str, unit_str):
+    """Convert a raw number + optional Indian unit (lakh/lac/crore/L/cr) into rupees."""
+    try:
+        val = float(num_str.replace(",", ""))
+    except Exception:
+        return None
+    u = (unit_str or "").lower().strip()
+    if u in ("lakh", "lakhs", "lac", "lacs", "l"):
+        val *= 100000
+    elif u in ("crore", "crores", "cr"):
+        val *= 10000000
+    elif u in ("k", "thousand"):
+        val *= 1000
+    return val
+
+
+def _extract_amount_after(text, after_keywords):
+    """Find the first number that appears AFTER any of the given keywords.
+    Returns rupee value or None."""
+    pat = (
+        r"(?:" + "|".join(re.escape(k) for k in after_keywords) + r")"
+        r"[^\d]{0,40}"
+        r"(\d[\d,]*\.?\d*)\s*(lakh|lakhs|lac|lacs|crore|crores|cr|l|k|thousand)?"
+    )
+    m = re.search(pat, text, re.IGNORECASE)
+    if not m:
+        return None
+    return _parse_amount_with_unit(m.group(1), m.group(2))
+
+
+def _extract_salary(text):
+    """Detect the primary salary figure mentioned in `text`.
+
+    Heuristics, in priority order:
+      1. Number immediately after 'salary' / 'income' / 'CTC' / 'gross' / 'package' / 'earn'.
+      2. The LARGEST standalone amount in the sentence (ignoring small numbers <₹1L,
+         which are almost always deduction figures, not salary).
+
+    Returns the rupee value, or None if no plausible salary found.
+    """
+    text = text or ""
+    # Priority 1: explicit salary keyword
+    for kw in ["salary", "income", "ctc", "gross", "package", "earn",
+               "earning", "earnings", "compensation", "pay"]:
+        v = _extract_amount_after(text, [kw])
+        if v and v >= 100000:    # at least ₹1L to be a plausible annual salary
+            return v
+
+    # Priority 2: largest standalone amount
+    candidates = []
+    for m in re.finditer(
+        r"(?<![\d.])(\d[\d,]*\.?\d*)\s*(lakh|lakhs|lac|lacs|crore|crores|cr|l|k|thousand)?",
+        text, re.IGNORECASE,
+    ):
+        v = _parse_amount_with_unit(m.group(1), m.group(2))
+        if v and v >= 100000:
+            candidates.append(v)
+    return max(candidates) if candidates else None
+
+
+# Section→ (display name, max cap in rupees, kind)
+# kind: 'old' → only in Old regime; 'both' → allowed in both regimes
+_DEDUCTION_PATTERNS = [
+    # 80C and substitutes
+    ("80c",      "Section 80C",          150000, "old"),
+    ("pf",       "PF (under 80C)",       150000, "old"),
+    ("ppf",      "PPF (under 80C)",      150000, "old"),
+    ("elss",     "ELSS (under 80C)",     150000, "old"),
+    ("lic",      "LIC premium (80C)",    150000, "old"),
+    # 80D health insurance
+    ("80d",      "Section 80D (health insurance)", 100000, "old"),
+    ("mediclaim","Mediclaim (80D)",      100000, "old"),
+    # NPS (additional)
+    ("80ccd(1b)","NPS 80CCD(1B)",         50000, "old"),
+    ("80ccd1b",  "NPS 80CCD(1B)",         50000, "old"),
+    # NPS (employer) — ALLOWED in NEW regime too
+    ("80ccd(2)", "Employer NPS 80CCD(2)", 99999999, "both"),
+    ("80ccd2",   "Employer NPS 80CCD(2)", 99999999, "both"),
+    ("employer nps", "Employer NPS 80CCD(2)", 99999999, "both"),
+    # Home loan interest — Section 24(b)
+    ("home loan",       "Home Loan Interest (24b)", 200000, "old"),
+    ("home-loan",       "Home Loan Interest (24b)", 200000, "old"),
+    ("housing loan",    "Home Loan Interest (24b)", 200000, "old"),
+    ("24(b)",           "Home Loan Interest (24b)", 200000, "old"),
+    # HRA
+    ("hra",             "HRA exemption",            99999999, "old"),
+    ("house rent",      "HRA exemption",            99999999, "old"),
+    # Education loan
+    ("80e",             "Section 80E (education loan)", 99999999, "old"),
+    ("education loan",  "Section 80E (education loan)", 99999999, "old"),
+    # Donation
+    ("80g",             "Section 80G (donation)",   99999999, "old"),
+    ("donation",        "Section 80G (donation)",   99999999, "old"),
+    # LTA
+    ("lta",             "LTA exemption",            99999999, "old"),
+    ("leave travel",    "LTA exemption",            99999999, "old"),
+    # Meal Passes / Sodexo — ALLOWED in NEW regime too
+    ("meal pass",       "Meal Passes / Sodexo",     26400, "both"),
+    ("meal passes",     "Meal Passes / Sodexo",     26400, "both"),
+    ("sodexo",          "Meal Passes / Sodexo",     26400, "both"),
+]
+
+
+def _extract_deductions(text):
+    """Return a list of {section, name, amount, kind} dicts found in the text.
+
+    Matching rules:
+      • Keyword must occur as a WHOLE WORD (no substring matches — e.g. '80c' must
+        not match inside '80ccd(2)').
+      • Find a nearby number (after first, then before; within ~40 chars).
+        The number must be ≥ 1000 to avoid grabbing stray digits from "80CCD(2)".
+        If no explicit amount mentioned, assume the FULL cap (assumed=True).
+      • Cap at the section's statutory limit.
+      • Dedupe by display name; first occurrence wins.
+    """
+    text = (text or "").lower()
+    found = {}
+    # Process keywords longest-first so '80ccd(2)' is consumed before '80c'.
+    for kw, name, cap, kind in sorted(_DEDUCTION_PATTERNS, key=lambda x: -len(x[0])):
+        kw_re = re.escape(kw)
+        # Whole-word boundary: not preceded/followed by alphanumerics that
+        # would extend the keyword (e.g. '80c' inside '80ccd').
+        # We treat the keyword start/end as boundaries against [a-z0-9].
+        boundary = r"(?<![a-z0-9])" + kw_re + r"(?![a-z0-9])"
+        if not re.search(boundary, text):
+            continue
+        # Number AFTER the keyword (within 40 chars)
+        pat_after = boundary + r"[^\d]{0,40}(\d[\d,]*\.?\d*)\s*(lakh|lakhs|lac|lacs|crore|crores|cr|l|k|thousand)?"
+        m = re.search(pat_after, text)
+        amount, assumed = None, False
+        if m:
+            v = _parse_amount_with_unit(m.group(1), m.group(2))
+            # Reject tiny stray numbers (likely a section number, not an amount)
+            if v is not None and v >= 1000:
+                amount = v
+        if amount is None:
+            # Number BEFORE the keyword
+            pat_before = r"(\d[\d,]*\.?\d*)\s*(lakh|lakhs|lac|lacs|crore|crores|cr|l|k|thousand)?[^\d]{0,40}" + boundary
+            m2 = re.search(pat_before, text)
+            if m2:
+                v = _parse_amount_with_unit(m2.group(1), m2.group(2))
+                if v is not None and v >= 1000:
+                    amount = v
+        if amount is None:
+            amount = cap
+            assumed = True
+        amount = min(amount, cap)
+        if name not in found:
+            found[name] = {"name": name, "amount": amount, "kind": kind, "assumed": assumed}
+    return list(found.values())
+
+
+def _tax_from_slabs(taxable, slabs):
+    if taxable <= 0:
+        return 0.0
+    prev, tax = 0, 0.0
+    for cap, rate in slabs:
+        slice_ = min(taxable, cap) - prev
+        if slice_ > 0:
+            tax += slice_ * rate
+        if taxable <= cap:
+            break
+        prev = cap
+    return tax
+
+
+def _compute_regime_breakup(gross, regime, deductions):
+    """Return a dict with the full step-by-step computation for one regime."""
+    if regime == "New":
+        std_ded = TAX_CALC_NEW_STD_DED
+        # Only deductions with kind='both' apply under New regime.
+        applicable = [d for d in deductions if d["kind"] == "both"]
+        slabs = TAX_CALC_NEW_SLABS
+        rebate_cap = TAX_CALC_NEW_REBATE_UP
+    else:
+        std_ded = TAX_CALC_OLD_STD_DED
+        applicable = list(deductions)
+        slabs = TAX_CALC_OLD_SLABS
+        rebate_cap = TAX_CALC_OLD_REBATE_UP
+
+    ded_total = sum(d["amount"] for d in applicable)
+    taxable = max(0, gross - std_ded - ded_total)
+    tax = _tax_from_slabs(taxable, slabs)
+    rebate_applied = False
+    if taxable <= rebate_cap:
+        tax = 0.0
+        rebate_applied = True
+    cess = tax * TAX_CALC_CESS
+    total = round(tax + cess)
+    return {
+        "regime": regime,
+        "std_ded": std_ded,
+        "deductions": applicable,
+        "deductions_total": ded_total,
+        "taxable": taxable,
+        "tax": round(tax),
+        "cess": round(cess),
+        "total": total,
+        "rebate_applied": rebate_applied,
+    }
+
+
+def _format_inr(amount):
+    return f"₹{amount:,.0f}"
+
+
+def _render_calc_answer(gross, new_r, old_r, deductions):
+    """Build a markdown answer comparing both regimes side-by-side."""
+    lines = [
+        f"### Tax computation for annual gross salary {_format_inr(gross)} (FY 2026-27)",
+        "",
+    ]
+    if deductions:
+        lines.append("**Deductions detected in your question:**")
+        for d in deductions:
+            note = " *(assumed full limit — mention the amount for accuracy)*" if d["assumed"] else ""
+            badge = "both regimes" if d["kind"] == "both" else "old regime only"
+            lines.append(f"- {d['name']}: {_format_inr(d['amount'])}  _({badge}){note}_")
+        lines.append("")
+    else:
+        lines.append("_No specific deductions mentioned. Old-regime numbers below assume NO investments. To get a tailored Old-regime result, mention your 80C / 80D / HRA / home-loan / NPS amounts._")
+        lines.append("")
+
+    def _section(label, r):
+        out = [f"#### {label}"]
+        out.append(f"- Standard deduction: {_format_inr(r['std_ded'])}")
+        if r["deductions"]:
+            out.append(f"- Other deductions applied: {_format_inr(r['deductions_total'])}")
+        else:
+            out.append("- Other deductions applied: ₹0 *(none allowed under this regime)*" if r["regime"] == "New" else "- Other deductions applied: ₹0")
+        out.append(f"- **Taxable income: {_format_inr(r['taxable'])}**")
+        if r["rebate_applied"]:
+            out.append("- Slab tax: nil after Section 87A rebate")
+        else:
+            out.append(f"- Slab tax: {_format_inr(r['tax'])}")
+            out.append(f"- Health & education cess (4%): {_format_inr(r['cess'])}")
+        out.append(f"- **Total tax payable: {_format_inr(r['total'])}**")
+        return "\n".join(out)
+
+    lines.append(_section("🆕 New Tax Regime", new_r))
+    lines.append("")
+    lines.append(_section("📜 Old Tax Regime", old_r))
+    lines.append("")
+
+    diff = old_r["total"] - new_r["total"]
+    if diff > 0:
+        lines.append(f"✅ **New Regime saves you {_format_inr(diff)}** over the Old regime in this scenario.")
+    elif diff < 0:
+        lines.append(f"✅ **Old Regime saves you {_format_inr(-diff)}** over the New regime in this scenario.")
+    else:
+        lines.append("⚖️ Both regimes give the same tax in this scenario.")
+
+    lines.append("")
+    lines.append("---")
+    lines.append("_This is an estimate based only on what you typed. For your exact liability, consult the Tax team at tax@koenig-solutions.com._")
+
+    return "\n".join(lines)
+
+
+def _looks_like_tax_question(text):
+    """Cheap intent check — the user is asking about tax on a salary number."""
+    t = (text or "").lower()
+    has_tax_word = any(w in t for w in [
+        "tax", "taxable", "liability", "how much", "calculate", "calc",
+        "regime", "deduct", "pay", "payable"
+    ])
+    return has_tax_word
+
+
+def try_tax_calculator(query):
+    """If `query` is a numeric tax question, return a computed answer. Else None."""
+    if not _looks_like_tax_question(query):
+        return None
+    gross = _extract_salary(query)
+    if not gross or gross < 100000:
+        return None
+    deductions = _extract_deductions(query)
+    new_r = _compute_regime_breakup(gross, "New", deductions)
+    old_r = _compute_regime_breakup(gross, "Old", deductions)
+    return _render_calc_answer(gross, new_r, old_r, deductions)
+
+
 def submit_query(query):
+    # 1. Try the live tax calculator first — if it produces a numeric answer,
+    #    return it directly without going through FAQ search.
+    calc_answer = try_tax_calculator(query)
+    if calc_answer is not None:
+        st.session_state.chat_history.append({
+            "query": query,
+            "type": "answer",
+            "answer": calc_answer,
+            "similarity": 1.0,
+            "source": "Live Tax Calculator",
+        })
+        # Log as a successful, in-record answer
+        try:
+            _ensure_query_log_table()
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            cur.execute(
+                """INSERT INTO query_log (
+                    asked_at, employee_id, employee_name, query,
+                    matched, in_record, matched_faq_id, matched_category,
+                    matched_question, similarity, response_type, source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    str(st.session_state.get("employee_id", "") or ""),
+                    str(st.session_state.get("employee_name", "") or ""),
+                    str(query)[:1000],
+                    1, 1, "calc", "Tax Calculator", "Tax computation",
+                    1.0, "answer", "Live Tax Calculator",
+                ),
+            )
+            conn.commit(); conn.close()
+        except Exception:
+            pass
+        return
+
+    # 2. Otherwise fall through to the normal FAQ semantic-search flow.
     results = semantic_search(query)
     if results.empty:
         st.session_state.chat_history.append({"query":query,"type":"not_found","answer":"Knowledge base is not loaded.","similarity":0,"source":""})
