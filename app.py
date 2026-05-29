@@ -20,12 +20,12 @@ except Exception:
     AI_AVAILABLE = False
 
 # =====================================================
-# KOENIG STRIDES - POLISHED LOGIN UI + RESPONSIVE
+# KOENIG STRIDE - POLISHED LOGIN UI + RESPONSIVE
 # Streamlit-native layout, no broken HTML wrappers
 # =====================================================
 
 st.set_page_config(
-    page_title="Koenig Strides",
+    page_title="Koenig Stride",
     page_icon="🤖",
     layout="wide",
     initial_sidebar_state="collapsed"
@@ -33,7 +33,7 @@ st.set_page_config(
 
 # =====================================================
 # RMS EMBED / SSO LAYER
-# Allows Koenig-Strides to be embedded inside RMS as an external app.
+# Allows Koenig-Stride to be embedded inside RMS as an external app.
 # Supports query params:
 #   ?embed=true                   → hide Streamlit chrome (header/footer/menu)
 #   ?panel=ask-strides            → deep-link to a specific panel after login
@@ -64,6 +64,9 @@ RMS_NAME_PARAM = str(_qp.get("name", "")).strip()
 RMS_ROLE_PARAM = str(_qp.get("role", "")).strip()
 RMS_TOKEN_PARAM = str(_qp.get("token", "")).strip()
 DEEP_LINK_PANEL = str(_qp.get("panel", "")).strip()
+# Admin escape-hatch: open /?admin=true to expose the admin login form.
+# Without this flag, the login screen is hidden (employees come via RMS only).
+ADMIN_OVERRIDE = str(_qp.get("admin", "")).lower() in ("1", "true", "yes")
 
 
 def _is_allowed_koenig_email(email):
@@ -183,7 +186,7 @@ EXCEL_PATH = BASE_DIR / "knowledge" / "Koenig_VoiceBot_FAQ_Master.xlsx"
 LOGO_PATH = BASE_DIR / "assets" / "koenig_logo.png"
 SARIKA_PATH = BASE_DIR / "assets" / "sarika.png"
 USERS_PATH = BASE_DIR / "users.csv"
-DB_PATH = BASE_DIR / "koenig_strides.db"
+DB_PATH = BASE_DIR / "koenig_stride.db"
 
 
 DEFAULT_EMPLOYEE_PASSWORD = "Welcome@123"
@@ -266,10 +269,22 @@ html, body, [class*="css"] {
 [data-testid="stToolbar"],
 [data-testid="stDecoration"],
 [data-testid="stStatusWidget"],
-.stDeployButton {
+[data-testid="stHeaderActionElements"],
+.stDeployButton,
+.viewerBadge_container__1QSob,
+.viewerBadge_link__qRIco,
+.viewerBadge_text__1JaDK,
+.styles_terminalButton__JBj5Y,
+a[href*="streamlit.io/cloud"],
+a[href*="share.streamlit.io"],
+footer,
+footer a {
     display:none !important;
     visibility:hidden !important;
 }
+
+/* Suppress the floating 'Manage app' button (owner-only, but cleaner for everyone) */
+#root > div:nth-child(1) > div.withScreencast > div > div > footer { display: none !important; }
 
 /* ---------- LOGIN PAGE ---------- */
 
@@ -1128,12 +1143,12 @@ def login_screen():
         else:
             st.markdown("<div class='login-logo-wrap'><h2 style='color:#04123d;'>KOENIG</h2></div>", unsafe_allow_html=True)
 
-        # 2. Koenig Strides title (under logo, brand-colored)
+        # 2. Koenig Stride title (under logo, brand-colored)
         st.markdown("""
         <div class='login-stack'>
             <div class='login-title-row'>
                 <div class='login-title-icon'>☻</div>
-                <h1 class='login-title-text'>Koenig Strides</h1>
+                <h1 class='login-title-text'>Koenig Stride</h1>
             </div>
             <div class='login-subtitle'>Tax &amp; Entity Nexus Assistant — Step Forward</div>
         </div>
@@ -1142,7 +1157,7 @@ def login_screen():
         # 3. Welcome hero (under title)
         st.markdown("""
         <div class='login-hero-card'>
-            <h2>Welcome to Koenig Strides</h2>
+            <h2>Welcome to Koenig Stride</h2>
             <p>Your secure internal assistant for tax, salary, entity and SPOC guidance.</p>
         </div>
         """, unsafe_allow_html=True)
@@ -1151,59 +1166,34 @@ def login_screen():
         st.markdown("<div class='login-form-card'>", unsafe_allow_html=True)
         st.markdown("<div class='login-form-heading'>🔐 Sign in to continue</div>", unsafe_allow_html=True)
 
-        login_type = st.radio("Login As", ["Employee", "Admin"], horizontal=True, label_visibility="visible")
-
-        if login_type == "Employee":
-            user_id = st.text_input("Employee ID", placeholder="Example: 1001")
-            password = st.text_input("Password", type="password", placeholder="Default: Welcome@123")
-            if st.button("Employee Login", use_container_width=True, type="primary"):
-                if not user_id.strip().isdigit():
-                    st.error("Please enter a valid numeric Employee ID.")
-                elif not password:
-                    st.error("Please enter password.")
-                else:
-                    ok, msg, row = authenticate_user(user_id, password)
-                    if ok:
-                        st.session_state.logged_in = True
-                        st.session_state.role = "Employee"
-                        st.session_state.employee_id = user_id.strip()
-                        st.session_state.employee_name = row.get("display_name", f"Employee {user_id}")
-                        st.session_state.must_change_password = bool_from_str(row.get("first_login", "False"))
-                        try:
-                            write_audit_log("LOGIN_SUCCESS", target_id=user_id.strip(), details="role=Employee")
-                        except Exception:
-                            pass
-                        st.rerun()
-                    else:
-                        try:
-                            write_audit_log("LOGIN_FAILED", target_id=user_id.strip(), details=f"role=Employee; reason={msg}")
-                        except Exception:
-                            pass
-                        st.error(msg)
-        else:
-            user_id = st.text_input("Admin Username", value="admin")
-            password = st.text_input("Password", type="password")
-            if st.button("Admin Login", use_container_width=True, type="primary"):
-                ok, msg, row = authenticate_user(user_id, password)
-                if ok and row.get("role") == "Admin":
-                    st.session_state.logged_in = True
-                    st.session_state.role = "Admin"
-                    st.session_state.employee_id = "admin"
-                    st.session_state.employee_name = row.get("display_name", "Admin")
-                    st.session_state.must_change_password = bool_from_str(row.get("first_login", "False"))
-                    try:
-                        write_audit_log("LOGIN_SUCCESS", target_id="admin", details="role=Admin")
-                    except Exception:
-                        pass
-                    st.rerun()
-                elif ok:
-                    st.error("This is not an admin account.")
-                else:
-                    try:
-                        write_audit_log("LOGIN_FAILED", target_id=str(user_id).strip(), details=f"role=Admin; reason={msg}")
-                    except Exception:
-                        pass
-                    st.error(msg)
+        # Employee login removed — employees now access Strides exclusively
+        # via the RMS portal (which passes ?email=<koenig email>). This screen
+        # is reachable only via the ?admin=true escape hatch and shows ONLY
+        # the admin credentials form.
+        st.caption("🔓 Admin access — employees should open Strides from RMS instead.")
+        user_id = st.text_input("Admin Username", value="admin")
+        password = st.text_input("Password", type="password")
+        if st.button("Admin Login", use_container_width=True, type="primary"):
+            ok, msg, row = authenticate_user(user_id, password)
+            if ok and row.get("role") == "Admin":
+                st.session_state.logged_in = True
+                st.session_state.role = "Admin"
+                st.session_state.employee_id = "admin"
+                st.session_state.employee_name = row.get("display_name", "Admin")
+                st.session_state.must_change_password = bool_from_str(row.get("first_login", "False"))
+                try:
+                    write_audit_log("LOGIN_SUCCESS", target_id="admin", details="role=Admin; via_admin_override")
+                except Exception:
+                    pass
+                st.rerun()
+            elif ok:
+                st.error("This is not an admin account.")
+            else:
+                try:
+                    write_audit_log("LOGIN_FAILED", target_id=str(user_id).strip(), details=f"role=Admin; reason={msg}")
+                except Exception:
+                    pass
+                st.error(msg)
 
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1215,12 +1205,56 @@ def login_screen():
         </div>
         """, unsafe_allow_html=True)
 
+def _render_rms_only_gate():
+    """Show a friendly 'access via RMS' page when no SSO identity is present.
+    Employees never see a login form — only this gate."""
+    rms_url = "https://rms.koenig-solutions.com"
+    try:
+        rms_url = st.secrets.get("RMS_PORTAL_URL", rms_url) or rms_url
+    except Exception:
+        pass
+    st.markdown("""
+    <style>
+      .rms-gate-wrap { max-width: 560px; margin: 80px auto 0 auto; text-align: center; }
+      .rms-gate-card {
+        background: linear-gradient(135deg,#04123d 0%,#0a3aae 55%,#155be8 100%);
+        color: white; padding: 36px 28px; border-radius: 18px;
+        box-shadow: 0 12px 32px rgba(15,23,42,.18);
+      }
+      .rms-gate-title { font-size: 22px; font-weight: 900; margin: 0 0 8px 0; }
+      .rms-gate-sub   { font-size: 14px; opacity: 0.92; margin: 0 0 22px 0; line-height: 1.55; }
+      .rms-gate-btn {
+        display: inline-block; background: white; color: #04123d;
+        font-weight: 800; padding: 11px 24px; border-radius: 10px;
+        text-decoration: none; box-shadow: 0 4px 14px rgba(0,0,0,.16);
+      }
+      .rms-gate-foot { font-size: 12px; color: #475569; margin-top: 22px; }
+      .rms-gate-foot a { color: #155be8; font-weight: 600; }
+    </style>
+    """, unsafe_allow_html=True)
+    st.markdown(f"""
+    <div class='rms-gate-wrap'>
+      <div class='rms-gate-card'>
+        <div class='rms-gate-title'>🔐 Please open Koenig Stride from the RMS portal</div>
+        <p class='rms-gate-sub'>
+          Koenig Stride uses your RMS identity — there's no separate login.<br>
+          Sign in to RMS and click the <b>Koenig Stride</b> tile.
+        </p>
+        <a class='rms-gate-btn' href='{rms_url}' target='_blank'>Go to RMS Portal →</a>
+      </div>
+      <div class='rms-gate-foot'>
+        Admin? Open <a href='?admin=true'>this URL</a> to sign in with admin credentials.
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
 def force_password_change_screen():
     c1, c2, c3 = st.columns([1, 2, 1])
     with c2:
         st.markdown("<div class='card'>", unsafe_allow_html=True)
         st.markdown("## 🔐 Change Password Required")
-        st.info("For security, please change your default password before using Koenig Strides.")
+        st.info("For security, please change your default password before using Koenig Stride.")
         new_password = st.text_input("New Password", type="password")
         confirm_password = st.text_input("Confirm New Password", type="password")
         if st.button("Update Password", use_container_width=True):
@@ -1337,24 +1371,21 @@ if not st.session_state.logged_in and not st.session_state.get("_rms_sso_tried")
             _sso_role = str(_payload.get("role", "")).strip() or None
             _sso_source = "token"
 
-    # 2/3. Fallback (dev / pilot): plain email or user param. Only honoured if
-    # RMS_ALLOW_PLAIN_SSO is true in st.secrets (off by default for safety).
+    # 2. Plain email param (?email=<koenig email>) — the standard RMS-integration
+    #    path. RMS passes the user's email in the URL and Strides logs them in.
+    #    Non-koenig domains are rejected below.
     if not (_sso_email or _sso_user):
-        try:
-            _allow_plain = str(st.secrets.get("RMS_ALLOW_PLAIN_SSO", "")).lower() in ("1", "true", "yes")
-        except Exception:
-            _allow_plain = False
-        if _allow_plain:
-            if RMS_EMAIL_PARAM:
-                _sso_email = RMS_EMAIL_PARAM.strip().lower()
-                _sso_name = RMS_NAME_PARAM or None
-                _sso_role = RMS_ROLE_PARAM or None
-                _sso_source = "plain"
-            elif RMS_USER_PARAM:
-                _sso_user = RMS_USER_PARAM
-                _sso_name = RMS_NAME_PARAM or RMS_USER_PARAM
-                _sso_role = RMS_ROLE_PARAM or "Employee"
-                _sso_source = "plain"
+        if RMS_EMAIL_PARAM:
+            _sso_email = RMS_EMAIL_PARAM.strip().lower()
+            _sso_name = RMS_NAME_PARAM or None
+            _sso_role = RMS_ROLE_PARAM or None
+            _sso_source = "plain"
+        elif RMS_USER_PARAM:
+            # Legacy fallback — RMS passing employee_id instead of email
+            _sso_user = RMS_USER_PARAM
+            _sso_name = RMS_NAME_PARAM or RMS_USER_PARAM
+            _sso_role = RMS_ROLE_PARAM or "Employee"
+            _sso_source = "plain"
 
     # ---- Email-based SSO (primary path) ----
     if _sso_email:
@@ -1414,8 +1445,42 @@ if not st.session_state.logged_in and not st.session_state.get("_rms_sso_tried")
         if _resolved:
             st.session_state.selected_panel = _resolved
 
+    # ---- Strip sensitive params from the URL after SSO succeeds ----
+    # Removes ?email=, ?token=, ?user=, ?role=, ?name= from the address bar
+    # so the email doesn't sit in browser history / get shoulder-surfed.
+    # `embed`, `panel`, and `admin` are kept (they're not sensitive).
+    if st.session_state.logged_in:
+        try:
+            kept = {}
+            for k in ("embed", "panel"):
+                v = _qp.get(k)
+                if v:
+                    kept[k] = v
+            # Clear all query params, then set back only the safe ones.
+            try:
+                st.query_params.clear()
+                for k, v in kept.items():
+                    st.query_params[k] = v
+            except Exception:
+                # Older Streamlit versions — best-effort fallback
+                try:
+                    st.experimental_set_query_params(**kept)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+# -----------------------------------------------------
+# Access gate
+#   • If SSO succeeded → already logged in, fall through.
+#   • If admin override (?admin=true) → show admin login form.
+#   • Otherwise → show 'Please open via RMS' page (no employee login).
+# -----------------------------------------------------
 if not st.session_state.logged_in:
-    login_screen()
+    if ADMIN_OVERRIDE:
+        login_screen()
+    else:
+        _render_rms_only_gate()
     st.stop()
 
 if st.session_state.must_change_password:
@@ -1637,7 +1702,7 @@ def render_answer(row):
         email_html = f"<br><b>Email:</b> {email}" if email else ""
         st.markdown(f"<div class='protected-box'><b>🔒 Protected Information</b><br>This information is protected and cannot be displayed here.<br><br>Please contact the designated SPOC:<br><b>SPOC:</b> {spoc}{email_html}</div>", unsafe_allow_html=True)
     else:
-        st.markdown(f"<div class='answer-box'><b>Koenig Strides Answer:</b><br>{get_answer_text(row)}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='answer-box'><b>Koenig Stride Answer:</b><br>{get_answer_text(row)}</div>", unsafe_allow_html=True)
 
 # =====================================================
 # SEARCH
@@ -1708,10 +1773,46 @@ def semantic_search(query, top_k=3):
     temp["similarity"] = scores
     return temp.sort_values("similarity", ascending=False).head(top_k)
 
+# ----- Out-of-scope / chitchat detector -----
+# When a query doesn't look like a tax/HR/finance question, we let the AI
+# respond casually (without strict KB constraints) so employees can chat
+# naturally. Examples: 'hello', 'how are you', 'tell me a joke', 'weather'.
+_CHITCHAT_INDICATORS = (
+    "hello", "hi ", "hi!", "hey", "good morning", "good afternoon", "good evening",
+    "how are you", "how's it going", "thank", "thanks", "thx", "bye", "goodbye",
+    "joke", "weather", "who are you", "what is your name", "who made you",
+    "sing", "poem", "story", "fun fact", "how old", "your favourite",
+    "are you human", "are you a bot", "chatgpt", "openai",
+)
+_BUSINESS_DOMAIN_WORDS = (
+    "tax", "salary", "payroll", "hra", "nps", "80c", "80d", "pf", "epf",
+    "deduct", "regime", "form 16", "form 12", "tds", "pan", "ctc",
+    "declaration", "investment", "reimburse", "meal pass", "sodexo",
+    "leave", "holiday", "labour", "compliance", "entity", "koenig",
+    "spoc", "finance", "hr", "income", "refund", "itr",
+)
+
+
+def _looks_like_chitchat(text):
+    t = (text or "").lower().strip()
+    if not t:
+        return False
+    if any(b in t for b in _BUSINESS_DOMAIN_WORDS):
+        return False
+    return any(c in t for c in _CHITCHAT_INDICATORS) or len(t.split()) <= 3
+
+
 def generate_response(query, results):
+    """Strict KB-grounded answer. The model is FORBIDDEN from inventing facts.
+
+    Returns (answer_text, is_ai_generated).
+      • is_ai_generated=True when GPT was used to compose the reply
+        (so the UI can show the ⚠️ yellow banner).
+      • is_ai_generated=False when the canned KB answer was used directly.
+    """
     top = results.iloc[0]
     if client is None:
-        return get_answer_text(top)
+        return get_answer_text(top), False
     context = ""
     for _, row in results.iterrows():
         context += f"""
@@ -1721,9 +1822,22 @@ Protected: {safe_get(row, 'Protected')}
 SPOC: {safe_get(row, 'SPOC Name')}
 Email: {safe_get(row, 'SPOC Email')}
 """
-    prompt = f"""
-You are Koenig Strides, an internal Tax & Entity Nexus Assistant.
-Use only the knowledge base below. Do not invent facts. If Protected is YES, do not reveal protected information and route employee to SPOC.
+    prompt = f"""You are **Koenig Stride**, an internal assistant for Koenig Solutions employees
+on Indian tax, payroll, HR, labour code, entity nexus and SPOC routing.
+
+STRICT RULES — follow without exception:
+
+1. Answer ONLY using the Knowledge Base provided below. Never invent facts,
+   never quote tax sections / dates / amounts that are not in the KB.
+2. If the KB does not clearly answer the question, reply EXACTLY with:
+   "This is not in our records. Please contact the Tax team at tax@koenig-solutions.com."
+3. If a KB row marked Protected=YES is the best match, do NOT reveal the answer.
+   Instead route the employee to the SPOC listed for that row.
+4. Do not give legal or financial advice. State that the answer is an internal
+   reference only.
+5. Keep answers concise (4-6 sentences) unless the user asks for detail.
+6. All amounts are in Indian Rupees (₹). Use Indian numbering format (1,50,000).
+7. The current Tax Year is FY 2026-27 under the Income-tax Act, 2025.
 
 Knowledge Base:
 {context}
@@ -1732,11 +1846,42 @@ Knowledge Base:
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role":"system","content":prompt},{"role":"user","content":query}],
-            temperature=0.2
+            temperature=0.1,
         )
-        return resp.choices[0].message.content
+        return resp.choices[0].message.content, True
     except Exception:
-        return get_answer_text(top)
+        return get_answer_text(top), False
+
+
+def generate_chitchat_response(query):
+    """Free-form AI reply for out-of-scope / casual questions."""
+    if client is None:
+        return (
+            "I'm Strides, the Koenig assistant for tax, payroll, HR and SPOC queries. "
+            "How can I help?",
+            False,
+        )
+    prompt = (
+        "You are Strides, a friendly assistant for Koenig Solutions employees.\n"
+        "Keep replies short (1-3 sentences), warm, and appropriate for an office setting.\n"
+        "If asked about your identity, say you are Strides — Koenig's internal assistant "
+        "for tax, payroll, HR and SPOC queries.\n"
+        "Do NOT give legal, tax, or financial advice in this casual mode — if asked, "
+        "redirect the user to ask the same question with 'tax' or 'salary' in it."
+    )
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role":"system","content":prompt},{"role":"user","content":query}],
+            temperature=0.7,
+        )
+        return resp.choices[0].message.content, True
+    except Exception:
+        return (
+            "I'm Strides, the Koenig assistant for tax, payroll, HR and SPOC queries. "
+            "How can I help?",
+            False,
+        )
 
 # -----------------------------------------------------
 # QUERY LOGGING (for Question Analytics admin panel)
@@ -2096,27 +2241,77 @@ def _render_calc_answer(gross, new_r, old_r, deductions):
     return "\n".join(lines)
 
 
+# Words that, when present alongside a salary-like number, indicate a tax
+# computation request. Kept broad so conversational follow-ups still match.
+_TAX_TRIGGER_WORDS = (
+    "tax", "taxable", "liability", "how much", "calculate", "calc",
+    "regime", "deduct", "pay", "payable",
+    # Conversational / follow-up hints
+    "income", "salary", "ctc", "package", "earning", "earn",
+    "if ", "what if", "and if", "compute",
+)
+
+
 def _looks_like_tax_question(text):
     """Cheap intent check — the user is asking about tax on a salary number."""
     t = (text or "").lower()
-    has_tax_word = any(w in t for w in [
-        "tax", "taxable", "liability", "how much", "calculate", "calc",
-        "regime", "deduct", "pay", "payable"
-    ])
-    return has_tax_word
+    return any(w in t for w in _TAX_TRIGGER_WORDS)
+
+
+def _last_turn_was_tax_calc():
+    """Return True iff the most recent assistant message was a tax computation.
+
+    Used to treat follow-up numeric questions (e.g. "and if income is 30 lakh?")
+    as calculator queries even when the trigger words are absent.
+    """
+    history = st.session_state.get("chat_history", [])
+    for item in reversed(history):
+        if item.get("type") == "answer" and item.get("source") == "Live Tax Calculator":
+            return True
+        if item.get("type") in ("answer", "protected", "not_found", "ai_answer"):
+            return False    # only count the most recent assistant turn
+    return False
+
+
+def _last_calc_deductions():
+    """Return the deductions list from the most recent tax-calc turn (or []).
+    Allows follow-up questions to inherit previously-mentioned 80C / HRA / etc."""
+    return list(st.session_state.get("_last_calc_deductions", []) or [])
 
 
 def try_tax_calculator(query):
-    """If `query` is a numeric tax question, return a computed answer. Else None."""
-    if not _looks_like_tax_question(query):
+    """If `query` is a numeric tax question, return a computed answer + an
+    inheritance note. Else return None.
+    """
+    has_intent = _looks_like_tax_question(query)
+    follow_up  = _last_turn_was_tax_calc()
+    if not (has_intent or follow_up):
         return None
     gross = _extract_salary(query)
     if not gross or gross < 100000:
         return None
+
     deductions = _extract_deductions(query)
+    inherited_note = ""
+    # If this is a follow-up and the user didn't restate any deductions,
+    # carry over the deductions from the previous tax-calc turn.
+    if follow_up and not deductions:
+        inherited = _last_calc_deductions()
+        if inherited:
+            deductions = inherited
+            names = ", ".join(d["name"] for d in inherited)
+            inherited_note = (
+                f"\n\n_\u2139\ufe0f Re-using deductions from your previous question: "
+                f"{names}. Mention different amounts in your next question to override._"
+            )
+
     new_r = _compute_regime_breakup(gross, "New", deductions)
     old_r = _compute_regime_breakup(gross, "Old", deductions)
-    return _render_calc_answer(gross, new_r, old_r, deductions)
+    answer = _render_calc_answer(gross, new_r, old_r, deductions) + inherited_note
+
+    # Remember the deductions for the next follow-up turn
+    st.session_state["_last_calc_deductions"] = deductions
+    return answer
 
 
 def submit_query(query):
@@ -2156,36 +2351,65 @@ def submit_query(query):
             pass
         return
 
-    # 2. Otherwise fall through to the normal FAQ semantic-search flow.
+    # 2. Chitchat / out-of-scope — let the AI answer casually (with banner).
+    if _looks_like_chitchat(query):
+        ans, _ai = generate_chitchat_response(query)
+        st.session_state.chat_history.append({
+            "query": query, "type": "answer",
+            "answer": ans, "similarity": 0.0,
+            "source": "AI (chitchat)", "ai_generated": True,
+            "chitchat": True,
+        })
+        log_query(query, "answer", None, 0.0)
+        return
+
+    # 3. Otherwise — strict KB-grounded answer via semantic search.
     results = semantic_search(query)
+    not_found_msg = (
+        "This is not in our records. Please contact the Tax team at "
+        "tax@koenig-solutions.com."
+    )
     if results.empty:
-        st.session_state.chat_history.append({"query":query,"type":"not_found","answer":"Knowledge base is not loaded.","similarity":0,"source":""})
+        st.session_state.chat_history.append({
+            "query": query, "type": "not_found",
+            "answer": "Knowledge base is not loaded. " + not_found_msg,
+            "similarity": 0, "source": "",
+        })
         log_query(query, "not_found", None, 0)
         return
     top = results.iloc[0]
     sim = float(top.get("similarity", 0))
-    if sim < QUERY_LOG_MIN_THRESHOLD:
-        st.session_state.chat_history.append({"query":query,"type":"not_found","answer":"I could not find a relevant answer. Please try differently or contact the relevant SPOC.","similarity":sim,"source":safe_get(top,"Source")})
+
+    # If the best match is too weak, refuse to guess.
+    if sim < QUERY_LOG_MATCH_THRESHOLD:
+        st.session_state.chat_history.append({
+            "query": query, "type": "not_found",
+            "answer": not_found_msg,
+            "similarity": sim, "source": safe_get(top, "Source"),
+        })
         log_query(query, "not_found", top, sim)
         return
-    if sim < QUERY_LOG_MATCH_THRESHOLD:
-        # Weak match — we still try to answer, but flag as 'not in record'
-        if is_protected(top):
-            spoc, email = get_spoc(top)
-            st.session_state.chat_history.append({"query":query,"type":"protected","answer":"This information is protected and cannot be displayed here.","spoc":spoc,"email":email,"similarity":sim,"source":safe_get(top,"Source")})
-            log_query(query, "weak_match", top, sim)
-            return
-        ans = generate_response(query, results)
-        st.session_state.chat_history.append({"query":query,"type":"answer","answer":ans,"similarity":sim,"source":safe_get(top,"Source")})
-        log_query(query, "weak_match", top, sim)
-        return
+
+    # Protected route
     if is_protected(top):
         spoc, email = get_spoc(top)
-        st.session_state.chat_history.append({"query":query,"type":"protected","answer":"This information is protected and cannot be displayed here.","spoc":spoc,"email":email,"similarity":sim,"source":safe_get(top,"Source")})
+        st.session_state.chat_history.append({
+            "query": query, "type": "protected",
+            "answer": "This information is protected and cannot be displayed here.",
+            "spoc": spoc, "email": email,
+            "similarity": sim, "source": safe_get(top, "Source"),
+        })
         log_query(query, "protected", top, sim)
         return
-    ans = generate_response(query, results)
-    st.session_state.chat_history.append({"query":query,"type":"answer","answer":ans,"similarity":sim,"source":safe_get(top,"Source")})
+
+    # Confident match — strict KB-grounded answer (may be AI-paraphrased).
+    ans, ai_used = generate_response(query, results)
+    st.session_state.chat_history.append({
+        "query": query, "type": "answer",
+        "answer": ans, "similarity": sim,
+        "source": safe_get(top, "Source"),
+        "ai_generated": ai_used,
+    })
     log_query(query, "answer", top, sim)
 
 
@@ -2670,7 +2894,7 @@ def _unused_transcribe_audio_with_openai(audio_bytes):
             language="en",
             prompt=(
                 "Indian English speaker. Common terms: HRA, NPS, Section 80C, "
-                "Form 16, Form 12B, Form 12BB, Sodexo, Koenig, Strides, Strides, "
+                "Form 16, Form 12B, Form 12BB, Sodexo, Koenig, Stride, Strides, "
                 "SPOC, TDS, PAN, CTC, Rupees, lakh, crore."
             ),
         )
@@ -3096,7 +3320,7 @@ def render_admin_analytics_dashboard():
             st.download_button(
                 "⬇️ Download full audit log (.csv)",
                 audit_df.to_csv(index=False).encode("utf-8"),
-                file_name="koenig_strides_audit_log.csv",
+                file_name="koenig_stride_audit_log.csv",
                 mime="text/csv",
                 use_container_width=True,
             )
@@ -3135,7 +3359,7 @@ with top2:
     st.markdown("""
     <div class='brand-row'>
         <div class='bot-icon'>☻</div>
-        <h1 class='brand-title'>Koenig Strides</h1>
+        <h1 class='brand-title'>Koenig Stride</h1>
     </div>
     <div class='brand-subtitle'>Tax & Entity Nexus Assistant — Step Forward</div>
     """, unsafe_allow_html=True)
@@ -3205,7 +3429,7 @@ with right:
     if selected_panel == "Home":
         st.markdown("""
         <div class='hero' style='margin-top:24px;'>
-            <h2>Welcome to Koenig Strides</h2>
+            <h2>Welcome to Koenig Stride</h2>
             <p>Select a panel from the left sidebar,<br>or use Ask Strides to ask directly.</p>
         </div>
         """, unsafe_allow_html=True)
@@ -3332,7 +3556,7 @@ with right:
                 with st.chat_message("assistant", avatar="👩‍💼"):
                     st.markdown(
                         f"Hi **{st.session_state.employee_name}** 👋  \n"
-                        "I'm **Strides**, your Koenig Strides assistant. "
+                        "I'm **Strides**, your Koenig Stride assistant. "
                         "Ask me anything about **Tax, Salary, Labour Code, Entity Nexus** or **SPOC routing**."
                     )
             else:
@@ -3353,7 +3577,20 @@ with right:
                             </div>
                             """, unsafe_allow_html=True)
                         else:
+                            # Yellow banner for AI-generated answers (everything
+                            # except the deterministic Live Tax Calculator).
                             st.markdown(item["answer"])
+                            # Soft footnote on non-deterministic answers — no
+                            # alarmist banner, just a gentle pointer if the user
+                            # wants to double-check.
+                            if item.get("ai_generated") and item.get("source") != "Live Tax Calculator" and not item.get("chitchat"):
+                                st.markdown(
+                                    "<div style='margin-top:8px;font-size:12px;color:#64748b;font-style:italic;'>"
+                                    "If there is any doubt, you may verify with the Tax team at "
+                                    "<a href='mailto:tax@koenig-solutions.com'>tax@koenig-solutions.com</a>."
+                                    "</div>",
+                                    unsafe_allow_html=True,
+                                )
 
                         if st.session_state.role == "Admin":
                             st.caption(
