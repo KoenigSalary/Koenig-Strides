@@ -30,11 +30,23 @@ That's it. No token, no signature, no extra headers. Strides will:
 
 | Param | Required | Purpose |
 |---|---|---|
-| `email` | **yes** | Koenig email address — used as identity (must end with `@koenig-solutions.com`) |
+| `email` | **yes** | Koenig email address — used as identity (must end with `@koenig-solutions.com`). See "Accepted email param spellings" below. |
 | `embed` | optional | Set to `true` to hide Streamlit chrome (header/footer/menu). Recommended for iframe use. |
 | `panel` | optional | Deep-link to a specific panel after login. Slugs: `ask-strides`, `spoc`, `user-management`, `knowledge-base`, `question-analytics`, `admin-analytics`. |
 | `name` | optional | Display name. If omitted, Strides derives it from the email (`aditya.sharma` → "Aditya Sharma"). |
 | `role` | optional | `Employee` (default) or `Admin`. Admins can also be configured server-side via `RMS_ADMIN_EMAILS` secret without RMS sending this param. |
+
+### Accepted email param spellings
+
+Strides accepts the email under any of these query-string names (first match wins):
+
+```
+email   emailid   email_id   user_email   useremail   userid   empemail   emp_email   mail
+```
+
+`email` is the canonical one (recommended). The others exist to absorb existing
+RMS / portal integrations without forcing them to change. The validated email
+is logged identically regardless of which spelling came in.
 
 ---
 

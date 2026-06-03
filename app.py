@@ -59,7 +59,16 @@ except Exception:
 
 EMBED_MODE = str(_qp.get("embed", "")).lower() in ("1", "true", "yes")
 RMS_USER_PARAM = str(_qp.get("user", "")).strip()
-RMS_EMAIL_PARAM = str(_qp.get("email", "")).strip()
+# Accept several common spellings of the email parameter so RMS / other portals
+# don't have to converge on a single name. First match wins.
+_EMAIL_PARAM_ALIASES = ("email", "emailid", "email_id", "user_email", "useremail",
+                       "userid", "empemail", "emp_email", "mail")
+RMS_EMAIL_PARAM = ""
+for _alias in _EMAIL_PARAM_ALIASES:
+    _v = str(_qp.get(_alias, "")).strip()
+    if _v:
+        RMS_EMAIL_PARAM = _v
+        break
 RMS_NAME_PARAM = str(_qp.get("name", "")).strip()
 RMS_ROLE_PARAM = str(_qp.get("role", "")).strip()
 RMS_TOKEN_PARAM = str(_qp.get("token", "")).strip()
