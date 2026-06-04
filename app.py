@@ -3180,6 +3180,301 @@ def render_question_analytics():
                     st.error(f"Could not clear log: {e}")
 
 
+# =====================================================
+# INTERACTIVE TAX CALCULATOR PANEL (Start Here → Tax Calculator tile)
+# Mirrors the reference Google Sheet design:
+#   Description | New Tax Regime | Old Tax Regime
+# with FY 2026-27 slabs and ₹ (Indian) number formatting.
+# =====================================================
+
+# Koenig salary-structure rules (for the educational expander)
+KOENIG_BASIC_PCT       = 0.50    # 50% of total
+KOENIG_HRA_PCT_OF_BASIC = 0.50   # 50% of Basic  →  25% of total
+KOENIG_MEAL_PASSES     = 105600  # ₹1,05,600 fixed
+KOENIG_REIMBURSEMENTS  = (
+    ("Telephone / Internet",       0.03),
+    ("Electricity Reimbursement",  0.03),
+    ("Professional / Software",    0.02),
+    ("Skill Development",          0.02),
+    ("Power & Utility Allowance",  0.02),
+)
+
+
+def _fmt_inr(n):
+    """Format a number in Indian (lakhs / crores) style with ₹ prefix."""
+    try:
+        n = int(round(float(n)))
+    except Exception:
+        return f"₹{n}"
+    s = str(abs(n))
+    if len(s) > 3:
+        last3 = s[-3:]
+        rest  = s[:-3]
+        groups = []
+        while len(rest) > 2:
+            groups.insert(0, rest[-2:])
+            rest = rest[:-2]
+        if rest:
+            groups.insert(0, rest)
+        s_formatted = ",".join(groups) + "," + last3
+    else:
+        s_formatted = s
+    return ("-" if n < 0 else "") + "₹" + s_formatted
+
+
+def _koenig_salary_split(gross):
+    """Return the Koenig auto-split for a given annual gross salary.
+    Order: Basic → HRA → Meal Passes → 5 reimbursements (each as % of total) →
+    leftover becomes Taxable Allowance. If salary is too small, Meal Passes
+    and reimbursements are clipped so Taxable Allowance never goes negative.
+    """
+    gross = max(0, float(gross or 0))
+    basic = gross * KOENIG_BASIC_PCT
+    hra   = basic * KOENIG_HRA_PCT_OF_BASIC
+    remaining = gross - basic - hra
+
+    meal  = min(KOENIG_MEAL_PASSES, max(0, remaining))
+    remaining -= meal
+
+    reimb_rows = []
+    for label, pct in KOENIG_REIMBURSEMENTS:
+        amt = min(gross * pct, max(0, remaining))
+        reimb_rows.append((label, amt))
+        remaining -= amt
+
+    taxable_allowance = max(0, remaining)
+    return {
+        "Basic (50%)":           basic,
+        "HRA (25% of total)":    hra,
+        "Meal Passes / Sodexo":  meal,
+        **{label: amt for label, amt in reimb_rows},
+        "Taxable Allowance":     taxable_allowance,
+    }
+
+
+def _compute_tax(gross, std_ded, deductions_dict, slabs, rebate_cap):
+    """Return a dict with full row-by-row breakdown for one regime."""
+    ded_total = sum(deductions_dict.values())
+    taxable = max(0, gross - std_ded - ded_total)
+    base_tax = _tax_from_slabs(taxable, slabs)
+    rebate_applied = False
+    if taxable <= rebate_cap:
+        base_tax = 0.0
+        rebate_applied = True
+    cess = base_tax * 0.04
+    return {
+        "std_ded": std_ded,
+        "deductions_total": ded_total,
+        "taxable": taxable,
+        "tax": base_tax,
+        "cess": cess,
+        "total": base_tax + cess,
+        "rebate_applied": rebate_applied,
+    }
+
+
+def render_tax_calculator_panel():
+    """Interactive Tax Calculator — side-by-side New vs Old regime (FY 2026-27)."""
+    st.markdown("## 🧮 Tax Calculator (FY 2026-27)")
+    st.caption(
+        "Enter your annual gross salary and (optionally) your tax-saving "
+        "investments. Strides will compute tax under both regimes side-by-side "
+        "using the Income-tax Act, 2025 slabs."
+    )
+
+    # ---- 1. Annual Gross Salary input ----
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        gross = st.number_input(
+            "Annual Gross Salary (₹)",
+            min_value=0, step=10000, value=1500000,
+            help="Your total annual CTC before any deductions.",
+            key="calc_gross_salary",
+        )
+    with col2:
+        st.markdown("&nbsp;", unsafe_allow_html=True)
+        st.metric("You entered", _fmt_inr(gross))
+
+    # ---- 2. Salary structure (collapsible) ----
+    with st.expander("📊 View Koenig salary-structure breakdown (optional)", expanded=False):
+        st.caption(
+            "Auto-split based on Koenig payroll rules: Basic 50% of CTC, HRA "
+            "25% of CTC, Meal Passes ₹1,05,600 (fixed), reimbursements 12%, "
+            "and the remainder becomes Taxable Allowance."
+        )
+        split = _koenig_salary_split(gross)
+        split_df = pd.DataFrame(
+            [(k, _fmt_inr(v)) for k, v in split.items()],
+            columns=["Component", "Annual Amount"],
+        )
+        st.dataframe(split_df, hide_index=True, use_container_width=True)
+        total_check = sum(split.values())
+        if abs(total_check - gross) > 1:
+            st.warning(
+                f"⚠️ At this salary level, the structure can't accommodate the "
+                f"full ₹1,05,600 Meal Passes — some components were proportionally "
+                f"reduced. Sum of split = {_fmt_inr(total_check)}."
+            )
+
+    st.markdown("---")
+
+    # ---- 3. Side-by-side regime inputs + outputs ----
+    new_col, old_col = st.columns(2)
+
+    # --- New Tax Regime ---
+    with new_col:
+        st.markdown("### 🆕 New Tax Regime")
+        st.caption("Standard deduction ₹75,000 · 87A rebate up to ₹12 L taxable.")
+        st.markdown("**Eligible deductions** (only these apply under New regime):")
+        new_meal = st.number_input(
+            "Meal Passes / Sodexo (₹)",
+            min_value=0, max_value=KOENIG_MEAL_PASSES, step=1000,
+            value=KOENIG_MEAL_PASSES,
+            help=f"Max ₹{KOENIG_MEAL_PASSES:,} per year. Tax-free perquisite.",
+            key="calc_new_meal",
+        )
+        new_nps2 = st.number_input(
+            "Employer NPS — Section 80CCD(2) (₹)",
+            min_value=0, step=1000, value=0,
+            help="Up to 14% of Basic (govt) / 10% of Basic (private). Enter actual employer contribution.",
+            key="calc_new_nps2",
+        )
+        new_deductions = {
+            "Meal Passes / Sodexo":      new_meal,
+            "Employer NPS 80CCD(2)":     new_nps2,
+        }
+        new_result = _compute_tax(
+            gross,
+            std_ded=TAX_CALC_NEW_STD_DED,
+            deductions_dict=new_deductions,
+            slabs=TAX_CALC_NEW_SLABS,
+            rebate_cap=TAX_CALC_NEW_REBATE_UP,
+        )
+
+    # --- Old Tax Regime ---
+    with old_col:
+        st.markdown("### 📜 Old Tax Regime")
+        st.caption("Standard deduction ₹50,000 · 87A rebate up to ₹5 L taxable.")
+        st.markdown("**Eligible deductions:**")
+        old_80c = st.number_input(
+            "Section 80C (₹) — PF, PPF, ELSS, LIC, ...",
+            min_value=0, max_value=150000, step=1000, value=0,
+            help="Combined limit for 80C + 80CCC + 80CCD(1) is ₹1,50,000.",
+            key="calc_old_80c",
+        )
+        old_80d = st.number_input(
+            "Section 80D (₹) — health insurance",
+            min_value=0, max_value=100000, step=1000, value=0,
+            help="₹25,000 self/family (₹50,000 if senior) + ₹25,000 (₹50,000) for parents.",
+            key="calc_old_80d",
+        )
+        old_nps1b = st.number_input(
+            "NPS — Section 80CCD(1B) (₹)",
+            min_value=0, max_value=50000, step=1000, value=0,
+            help="Additional ₹50,000 over and above 80C.",
+            key="calc_old_nps1b",
+        )
+        old_hra = st.number_input(
+            "HRA exemption (₹)",
+            min_value=0, step=1000, value=0,
+            help="Least of: actual HRA / rent–10% of Basic / 50% (metro) or 40% (non-metro) of Basic.",
+            key="calc_old_hra",
+        )
+        old_home_loan = st.number_input(
+            "Home Loan Interest — Sec 24(b) (₹)",
+            min_value=0, max_value=200000, step=1000, value=0,
+            help="Up to ₹2,00,000 for self-occupied property.",
+            key="calc_old_home_loan",
+        )
+        old_other = st.number_input(
+            "Other deductions — 80E, 80G, LTA, etc. (₹)",
+            min_value=0, step=1000, value=0,
+            help="Education loan interest (80E), donations (80G), LTA travel reimbursement, etc.",
+            key="calc_old_other",
+        )
+        old_meal = st.number_input(
+            "Meal Passes / Sodexo (₹)",
+            min_value=0, max_value=KOENIG_MEAL_PASSES, step=1000,
+            value=KOENIG_MEAL_PASSES,
+            help=f"Max ₹{KOENIG_MEAL_PASSES:,} per year. Tax-free under both regimes.",
+            key="calc_old_meal",
+        )
+        old_nps2 = st.number_input(
+            "Employer NPS — 80CCD(2) (₹)",
+            min_value=0, step=1000, value=0,
+            key="calc_old_nps2",
+        )
+        old_deductions = {
+            "Section 80C":            old_80c,
+            "Section 80D":            old_80d,
+            "NPS 80CCD(1B)":          old_nps1b,
+            "HRA exemption":          old_hra,
+            "Home Loan Interest":     old_home_loan,
+            "Other deductions":       old_other,
+            "Meal Passes / Sodexo":   old_meal,
+            "Employer NPS 80CCD(2)":  old_nps2,
+        }
+        old_result = _compute_tax(
+            gross,
+            std_ded=TAX_CALC_OLD_STD_DED,
+            deductions_dict=old_deductions,
+            slabs=TAX_CALC_OLD_SLABS,
+            rebate_cap=TAX_CALC_OLD_REBATE_UP,
+        )
+
+    st.markdown("---")
+
+    # ---- 4. Side-by-side results table (mirrors the reference Google Sheet) ----
+    st.markdown("### 📊 Tax Computation Summary")
+    summary_rows = [
+        ("Gross Income",            _fmt_inr(gross),                           _fmt_inr(gross)),
+        ("Standard Deduction",      _fmt_inr(new_result["std_ded"]),           _fmt_inr(old_result["std_ded"])),
+        ("Total Other Deductions",  _fmt_inr(new_result["deductions_total"]),  _fmt_inr(old_result["deductions_total"])),
+        ("Taxable Income",          _fmt_inr(new_result["taxable"]),           _fmt_inr(old_result["taxable"])),
+        ("Slab Tax",                _fmt_inr(new_result["tax"]),               _fmt_inr(old_result["tax"])),
+        ("Health & Education Cess (4%)", _fmt_inr(new_result["cess"]),         _fmt_inr(old_result["cess"])),
+        ("Section 87A Rebate",      "Applied" if new_result["rebate_applied"] else "Not eligible",
+                                    "Applied" if old_result["rebate_applied"] else "Not eligible"),
+        ("💰 TOTAL TAX PAYABLE",     _fmt_inr(new_result["total"]),             _fmt_inr(old_result["total"])),
+    ]
+    summary_df = pd.DataFrame(summary_rows, columns=["Description", "New Tax Regime", "Old Tax Regime"])
+    st.dataframe(summary_df, hide_index=True, use_container_width=True)
+
+    # ---- 5. Savings banner ----
+    diff = old_result["total"] - new_result["total"]
+    if abs(diff) < 1:
+        st.info("⚖️ Both regimes produce the same tax for this scenario.")
+    elif diff > 0:
+        st.success(
+            f"✅ **New Regime saves you {_fmt_inr(diff)}** over the Old regime "
+            f"in this scenario."
+        )
+    else:
+        st.success(
+            f"✅ **Old Regime saves you {_fmt_inr(-diff)}** over the New regime "
+            f"in this scenario."
+        )
+
+    # ---- 6. CSV download ----
+    csv_bytes = summary_df.to_csv(index=False).encode("utf-8-sig")
+    st.download_button(
+        "⬇️ Download summary as CSV",
+        data=csv_bytes,
+        file_name=f"strides_tax_calculation_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+    st.markdown(
+        "<div style='margin-top:12px;font-size:12px;color:#64748b;font-style:italic;'>"
+        "This is an estimate based only on what you entered. "
+        "If there is any doubt, you may verify with the Tax team at "
+        "<a href='mailto:tax@koenig-solutions.com'>tax@koenig-solutions.com</a>."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+
 def render_home_admin_charts():
     """Admin-only mini-dashboard shown on the Home panel.
 
@@ -3468,6 +3763,7 @@ with right:
         st.markdown("### Select Area")
         modules = [
             ("✅ Tax FAQs", "Tax FAQs"),
+            ("🧮 Tax Calculator", "Tax Calculator"),
             ("✅ Salary Queries", "Salary Queries"),
             ("⚖️ Labour Code", "Labour Code"),
             ("✅ Entity Nexus", "Entity Nexus"),
@@ -3475,7 +3771,7 @@ with right:
             ("🔒 Protected Information Routing", "Protected Information Routing"),
             ("✅ Compliance Support", "Compliance Support"),
         ]
-        rows = [st.columns(2), st.columns(2), st.columns(2), st.columns(1)]
+        rows = [st.columns(2), st.columns(2), st.columns(2), st.columns(2)]
         flat_cols = rows[0] + rows[1] + rows[2] + rows[3]
         for i, (label, module_name) in enumerate(modules):
             with flat_cols[i]:
@@ -3492,6 +3788,12 @@ with right:
                 st.markdown(f"<span class='selected-pill'>Selected: {selected}</span>", unsafe_allow_html=True)
                 st.markdown("### 📞 SPOC Directory")
                 render_spoc_routing()
+                st.markdown("</div>", unsafe_allow_html=True)
+            # Tax Calculator — interactive computation, no FAQ browsing.
+            elif selected == "Tax Calculator":
+                st.markdown("<div class='card'>", unsafe_allow_html=True)
+                st.markdown(f"<span class='selected-pill'>Selected: {selected}</span>", unsafe_allow_html=True)
+                render_tax_calculator_panel()
                 st.markdown("</div>", unsafe_allow_html=True)
             else:
                 st.markdown("<div class='card'>", unsafe_allow_html=True)
