@@ -1811,13 +1811,15 @@ def _looks_like_chitchat(text):
     return any(c in t for c in _CHITCHAT_INDICATORS) or len(t.split()) <= 3
 
 
-def generate_response(query, results):
+def generate_response(query, results, confidence="strong"):
     """Strict KB-grounded answer. The model is FORBIDDEN from inventing facts.
 
+    confidence:
+      "strong" — the top FAQ is a confident match. Paraphrase it directly.
+      "medium" — the match is approximate. The model is told to BE EXPLICIT
+                   about that and hedge accordingly.
+
     Returns (answer_text, is_ai_generated).
-      • is_ai_generated=True when GPT was used to compose the reply
-        (so the UI can show the ⚠️ yellow banner).
-      • is_ai_generated=False when the canned KB answer was used directly.
     """
     top = results.iloc[0]
     if client is None:
@@ -1831,6 +1833,27 @@ Protected: {safe_get(row, 'Protected')}
 SPOC: {safe_get(row, 'SPOC Name')}
 Email: {safe_get(row, 'SPOC Email')}
 """
+    if confidence == "medium":
+        hedge_clause = (
+            "IMPORTANT: The Knowledge Base entries below are only an APPROXIMATE "
+            "match for the user's question — not an exact one. Follow these rules "
+            "strictly:\n"
+            "  • Begin your reply with: \"I don't have an exact answer for this, "
+            "but here's the closest relevant guidance from our records:\"\n"
+            "  • Then quote / paraphrase the most-relevant KB row(s).\n"
+            "  • End with: \"For a precise answer to your specific question, please "
+            "contact tax@koenig-solutions.com.\"\n"
+            "  • Do NOT invent details or sections that are not in the KB.\n"
+            "  • If none of the KB rows is even tangentially relevant, reply EXACTLY "
+            "with: \"This is not in our records. Please contact the Tax team at "
+            "tax@koenig-solutions.com.\"\n"
+        )
+    else:
+        hedge_clause = (
+            "The Knowledge Base below contains the relevant FAQ for the user's "
+            "question. Answer based on it directly.\n"
+        )
+
     prompt = f"""You are **Koenig Stride**, an internal assistant for Koenig Solutions employees
 on Indian tax, payroll, HR, labour code, entity nexus and SPOC routing.
 
@@ -1848,6 +1871,7 @@ STRICT RULES — follow without exception:
 6. All amounts are in Indian Rupees (₹). Use Indian numbering format (1,50,000).
 7. The current Tax Year is FY 2026-27 under the Income-tax Act, 2025.
 
+{hedge_clause}
 Knowledge Base:
 {context}
 """
@@ -1895,8 +1919,14 @@ def generate_chitchat_response(query):
 # -----------------------------------------------------
 # QUERY LOGGING (for Question Analytics admin panel)
 # Threshold above which a query is considered "matched / in record"
-QUERY_LOG_MATCH_THRESHOLD = 0.35  # below this → weak match / not in record
-QUERY_LOG_MIN_THRESHOLD = 0.15    # below this → no answer at all
+# 3-tier confidence model for FAQ semantic search:
+#   >= STRONG  → high confidence: AI paraphrases the top FAQ directly
+#   >= MEDIUM  → medium confidence: AI uses top results BUT is told the match
+#                                    is approximate, so the reply is hedged
+#   <  MEDIUM  → weak / no good match: refuse to guess, return "not in records"
+QUERY_LOG_STRONG_THRESHOLD = 0.55
+QUERY_LOG_MATCH_THRESHOLD  = 0.40   # below this → weak / not in record
+QUERY_LOG_MIN_THRESHOLD    = 0.15   # below this → don't even try
 # -----------------------------------------------------
 
 
@@ -2399,7 +2429,7 @@ def submit_query(query):
         log_query(query, "not_found", top, sim)
         return
 
-    # Protected route
+    # Protected route (regardless of confidence tier)
     if is_protected(top):
         spoc, email = get_spoc(top)
         st.session_state.chat_history.append({
@@ -2411,13 +2441,17 @@ def submit_query(query):
         log_query(query, "protected", top, sim)
         return
 
-    # Confident match — strict KB-grounded answer (may be AI-paraphrased).
-    ans, ai_used = generate_response(query, results)
+    # Three-tier answer:
+    #   ≥ STRONG threshold → AI paraphrases directly
+    #   between MATCH and STRONG → AI gives a HEDGED answer (explicitly says "not exact")
+    confidence = "strong" if sim >= QUERY_LOG_STRONG_THRESHOLD else "medium"
+    ans, ai_used = generate_response(query, results, confidence=confidence)
     st.session_state.chat_history.append({
         "query": query, "type": "answer",
         "answer": ans, "similarity": sim,
         "source": safe_get(top, "Source"),
         "ai_generated": ai_used,
+        "confidence": confidence,
     })
     log_query(query, "answer", top, sim)
 
