@@ -1,5 +1,4 @@
 import streamlit as st
-import streamlit.components.v1 as components
 import pandas as pd
 from pathlib import Path
 import base64
@@ -39,11 +38,16 @@ st.set_page_config(
 #   ?embed=true                   → hide Streamlit chrome (header/footer/menu)
 #   ?panel=ask-strides            → deep-link to a specific panel after login
 #                                   (legacy alias ?panel=ask-sarika still works)
-#   ?user=<emp_id>&role=<r>       → RMS-issued identity (plain, dev mode)
-#   ?token=<signed_jwt>           → RMS-issued signed token (prod mode)
+#   ?email=<koenig email>         → RMS-issued email identity (plain, dev mode)
+#   ?user=<emp_id>&role=<r>       → legacy RMS-issued ID identity (plain, dev mode)
+#   ?token=<signed_jwt>           → RMS-issued signed token (prod mode, preferred)
 # In prod, the token is verified using RMS_SSO_SECRET in st.secrets.
+# Tokens MUST contain a `email` (preferred) or `user` claim, optional `name`/`role`.
+# Only `@koenig-solutions.com` email addresses are accepted.
 # If verification fails or token is absent, user falls through to normal login.
 # =====================================================
+
+ALLOWED_SSO_DOMAIN = "@koenig-solutions.com"
 
 try:
     _qp = dict(st.query_params)
@@ -54,18 +58,87 @@ except Exception:
         _qp = {}
 
 EMBED_MODE = str(_qp.get("embed", "")).lower() in ("1", "true", "yes")
+
+# ----- Health-check / keep-awake endpoint --------------------------------
+# An external pinger (GitHub Actions, UptimeRobot, etc.) can hit /?ping=1
+# to keep the Streamlit Cloud container warm. Returns instantly without
+# loading the FAQ, knowledge or SSO machinery.
+if str(_qp.get("ping", "")).lower() in ("1", "true", "yes"):
+    st.write("OK")
+    st.stop()
 RMS_USER_PARAM = str(_qp.get("user", "")).strip()
+# Accept several common spellings of the email parameter so RMS / other portals
+# don't have to converge on a single name. First match wins.
+_EMAIL_PARAM_ALIASES = ("email", "emailid", "email_id", "user_email", "useremail",
+                       "userid", "empemail", "emp_email", "mail")
+RMS_EMAIL_PARAM = ""
+for _alias in _EMAIL_PARAM_ALIASES:
+    _v = str(_qp.get(_alias, "")).strip()
+    if _v:
+        RMS_EMAIL_PARAM = _v
+        break
+RMS_NAME_PARAM = str(_qp.get("name", "")).strip()
 RMS_ROLE_PARAM = str(_qp.get("role", "")).strip()
 RMS_TOKEN_PARAM = str(_qp.get("token", "")).strip()
 DEEP_LINK_PANEL = str(_qp.get("panel", "")).strip()
+# Admin escape-hatch: open /?admin=true to expose the admin login form.
+# Without this flag, the login screen is hidden (employees come via RMS only).
+ADMIN_OVERRIDE = str(_qp.get("admin", "")).lower() in ("1", "true", "yes")
+
+
+def _is_allowed_koenig_email(email):
+    """True if the email is non-empty and ends with @koenig-solutions.com."""
+    if not email:
+        return False
+    email = email.strip().lower()
+    return email.endswith(ALLOWED_SSO_DOMAIN) and "@" in email and len(email) > len(ALLOWED_SSO_DOMAIN)
+
+
+def _employee_id_from_email(email):
+    """praveen.chaudhary@koenig-solutions.com → 'praveen.chaudhary'.
+    Returns lower-case localpart, safe to use as a Strides user_id."""
+    if not email or "@" not in email:
+        return ""
+    return email.split("@", 1)[0].strip().lower()
+
+
+def _name_from_email(email):
+    """Derive a display name from an email.
+    praveen.chaudhary@koenig-solutions.com → 'Praveen Chaudhary'."""
+    local = _employee_id_from_email(email)
+    if not local:
+        return ""
+    parts = [p for p in local.replace("_", ".").replace("-", ".").split(".") if p]
+    return " ".join(p.capitalize() for p in parts) if parts else local
+
+
+def _is_admin_email(email):
+    """Check if an email is in the configured RMS_ADMIN_EMAILS list.
+    Accepts comma- or whitespace-separated emails in st.secrets."""
+    if not email:
+        return False
+    try:
+        raw = st.secrets.get("RMS_ADMIN_EMAILS", "")
+    except Exception:
+        raw = ""
+    if not raw:
+        return False
+    if isinstance(raw, (list, tuple)):
+        admin_set = {str(e).strip().lower() for e in raw if e}
+    else:
+        admin_set = {e.strip().lower() for e in re.split(r"[,\s]+", str(raw)) if e.strip()}
+    return email.strip().lower() in admin_set
 
 
 def _verify_rms_sso_token(token):
     """Verify an RMS-issued JWT and return the payload, or None if invalid.
 
     Expected payload shape:
-        {"user": "<emp_id>", "name": "<full_name>", "role": "Employee|Admin",
-         "exp": <unix_ts>}
+        {"email": "<koenig email>",   # preferred
+         "user":  "<emp_id>",         # legacy, optional
+         "name":  "<full_name>",
+         "role":  "Employee|Admin",
+         "exp":   <unix_ts>}
 
     Requires RMS_SSO_SECRET in st.secrets (HMAC-SHA256 shared secret with RMS).
     PyJWT is preferred; if not installed, a minimal HMAC verification fallback
@@ -131,8 +204,7 @@ LOGO_PATH = BASE_DIR / "assets" / "koenig_logo.png"
 SARIKA_PATH = BASE_DIR / "assets" / "sarika.png"
 USERS_PATH = BASE_DIR / "users.csv"
 DB_PATH = BASE_DIR / "koenig_stride.db"
-PROOF_FOLDER = BASE_DIR / "proof_uploads"
-PROOF_FOLDER.mkdir(exist_ok=True)
+
 
 DEFAULT_EMPLOYEE_PASSWORD = "Welcome@123"
 
@@ -214,10 +286,22 @@ html, body, [class*="css"] {
 [data-testid="stToolbar"],
 [data-testid="stDecoration"],
 [data-testid="stStatusWidget"],
-.stDeployButton {
+[data-testid="stHeaderActionElements"],
+.stDeployButton,
+.viewerBadge_container__1QSob,
+.viewerBadge_link__qRIco,
+.viewerBadge_text__1JaDK,
+.styles_terminalButton__JBj5Y,
+a[href*="streamlit.io/cloud"],
+a[href*="share.streamlit.io"],
+footer,
+footer a {
     display:none !important;
     visibility:hidden !important;
 }
+
+/* Suppress the floating 'Manage app' button (owner-only, but cleaner for everyone) */
+#root > div:nth-child(1) > div.withScreencast > div > div > footer { display: none !important; }
 
 /* ---------- LOGIN PAGE ---------- */
 
@@ -1099,59 +1183,34 @@ def login_screen():
         st.markdown("<div class='login-form-card'>", unsafe_allow_html=True)
         st.markdown("<div class='login-form-heading'>🔐 Sign in to continue</div>", unsafe_allow_html=True)
 
-        login_type = st.radio("Login As", ["Employee", "Admin"], horizontal=True, label_visibility="visible")
-
-        if login_type == "Employee":
-            user_id = st.text_input("Employee ID", placeholder="Example: 1001")
-            password = st.text_input("Password", type="password", placeholder="Default: Welcome@123")
-            if st.button("Employee Login", use_container_width=True, type="primary"):
-                if not user_id.strip().isdigit():
-                    st.error("Please enter a valid numeric Employee ID.")
-                elif not password:
-                    st.error("Please enter password.")
-                else:
-                    ok, msg, row = authenticate_user(user_id, password)
-                    if ok:
-                        st.session_state.logged_in = True
-                        st.session_state.role = "Employee"
-                        st.session_state.employee_id = user_id.strip()
-                        st.session_state.employee_name = row.get("display_name", f"Employee {user_id}")
-                        st.session_state.must_change_password = bool_from_str(row.get("first_login", "False"))
-                        try:
-                            write_audit_log("LOGIN_SUCCESS", target_id=user_id.strip(), details="role=Employee")
-                        except Exception:
-                            pass
-                        st.rerun()
-                    else:
-                        try:
-                            write_audit_log("LOGIN_FAILED", target_id=user_id.strip(), details=f"role=Employee; reason={msg}")
-                        except Exception:
-                            pass
-                        st.error(msg)
-        else:
-            user_id = st.text_input("Admin Username", value="admin")
-            password = st.text_input("Password", type="password")
-            if st.button("Admin Login", use_container_width=True, type="primary"):
-                ok, msg, row = authenticate_user(user_id, password)
-                if ok and row.get("role") == "Admin":
-                    st.session_state.logged_in = True
-                    st.session_state.role = "Admin"
-                    st.session_state.employee_id = "admin"
-                    st.session_state.employee_name = row.get("display_name", "Admin")
-                    st.session_state.must_change_password = bool_from_str(row.get("first_login", "False"))
-                    try:
-                        write_audit_log("LOGIN_SUCCESS", target_id="admin", details="role=Admin")
-                    except Exception:
-                        pass
-                    st.rerun()
-                elif ok:
-                    st.error("This is not an admin account.")
-                else:
-                    try:
-                        write_audit_log("LOGIN_FAILED", target_id=str(user_id).strip(), details=f"role=Admin; reason={msg}")
-                    except Exception:
-                        pass
-                    st.error(msg)
+        # Employee login removed — employees now access Strides exclusively
+        # via the RMS portal (which passes ?email=<koenig email>). This screen
+        # is reachable only via the ?admin=true escape hatch and shows ONLY
+        # the admin credentials form.
+        st.caption("🔓 Admin access — employees should open Strides from RMS instead.")
+        user_id = st.text_input("Admin Username", value="admin")
+        password = st.text_input("Password", type="password")
+        if st.button("Admin Login", use_container_width=True, type="primary"):
+            ok, msg, row = authenticate_user(user_id, password)
+            if ok and row.get("role") == "Admin":
+                st.session_state.logged_in = True
+                st.session_state.role = "Admin"
+                st.session_state.employee_id = "admin"
+                st.session_state.employee_name = row.get("display_name", "Admin")
+                st.session_state.must_change_password = bool_from_str(row.get("first_login", "False"))
+                try:
+                    write_audit_log("LOGIN_SUCCESS", target_id="admin", details="role=Admin; via_admin_override")
+                except Exception:
+                    pass
+                st.rerun()
+            elif ok:
+                st.error("This is not an admin account.")
+            else:
+                try:
+                    write_audit_log("LOGIN_FAILED", target_id=str(user_id).strip(), details=f"role=Admin; reason={msg}")
+                except Exception:
+                    pass
+                st.error(msg)
 
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1162,6 +1221,50 @@ def login_screen():
             Contact your administrator for assistance.
         </div>
         """, unsafe_allow_html=True)
+
+def _render_rms_only_gate():
+    """Show a friendly 'access via RMS' page when no SSO identity is present.
+    Employees never see a login form — only this gate."""
+    rms_url = "https://rms.koenig-solutions.com"
+    try:
+        rms_url = st.secrets.get("RMS_PORTAL_URL", rms_url) or rms_url
+    except Exception:
+        pass
+    st.markdown("""
+    <style>
+      .rms-gate-wrap { max-width: 560px; margin: 80px auto 0 auto; text-align: center; }
+      .rms-gate-card {
+        background: linear-gradient(135deg,#04123d 0%,#0a3aae 55%,#155be8 100%);
+        color: white; padding: 36px 28px; border-radius: 18px;
+        box-shadow: 0 12px 32px rgba(15,23,42,.18);
+      }
+      .rms-gate-title { font-size: 22px; font-weight: 900; margin: 0 0 8px 0; }
+      .rms-gate-sub   { font-size: 14px; opacity: 0.92; margin: 0 0 22px 0; line-height: 1.55; }
+      .rms-gate-btn {
+        display: inline-block; background: white; color: #04123d;
+        font-weight: 800; padding: 11px 24px; border-radius: 10px;
+        text-decoration: none; box-shadow: 0 4px 14px rgba(0,0,0,.16);
+      }
+      .rms-gate-foot { font-size: 12px; color: #475569; margin-top: 22px; }
+      .rms-gate-foot a { color: #155be8; font-weight: 600; }
+    </style>
+    """, unsafe_allow_html=True)
+    st.markdown(f"""
+    <div class='rms-gate-wrap'>
+      <div class='rms-gate-card'>
+        <div class='rms-gate-title'>🔐 Please open Koenig Stride from the RMS portal</div>
+        <p class='rms-gate-sub'>
+          Koenig Stride uses your RMS identity — there's no separate login.<br>
+          Sign in to RMS and click the <b>Koenig Stride</b> tile.
+        </p>
+        <a class='rms-gate-btn' href='{rms_url}' target='_blank'>Go to RMS Portal →</a>
+      </div>
+      <div class='rms-gate-foot'>
+        Admin? Open <a href='?admin=true'>this URL</a> to sign in with admin credentials.
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
 
 def force_password_change_screen():
     c1, c2, c3 = st.columns([1, 2, 1])
@@ -1191,65 +1294,210 @@ def force_password_change_screen():
 
 # -----------------------------------------------------
 # RMS SSO auto-login (runs once per session if params present)
+#
+# Identity resolution priority:
+#   1. Signed JWT token (?token=...)  — production path
+#   2. Plain email param (?email=...) — dev/pilot only, gated by RMS_ALLOW_PLAIN_SSO
+#   3. Legacy user+role params         — dev/pilot only, gated by RMS_ALLOW_PLAIN_SSO
+#
+# Only @koenig-solutions.com emails are accepted.
+# First-time SSO users are auto-created in users.csv (linked to Employee Master
+# by email when possible).
 # -----------------------------------------------------
+
+
+def _link_or_create_sso_employee(email, display_name):
+    """Ensure the SSO user has a row in users.csv.
+
+    Strategy:
+      - Derive the internal user_id from the email localpart
+        (e.g. 'praveen.chaudhary' from 'praveen.chaudhary@koenig-solutions.com').
+      - If an Employee Master row exists with the same email, copy its
+        display name & department, AND keep the localpart as the user_id
+        (so future Strides records use a stable, human-readable ID).
+      - Insert a users.csv row with an unguessable random hash (SSO users
+        never need to type a password) and active=True.
+    """
+    email = (email or "").strip().lower()
+    if not _is_allowed_koenig_email(email):
+        return None, None
+
+    user_id = _employee_id_from_email(email)
+    pretty_name = (display_name or "").strip() or _name_from_email(email)
+
+    # Try to enrich from Employee Master (DB)
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT employee_id, employee_name FROM employee_master WHERE LOWER(email) = ? LIMIT 1",
+            (email,),
+        )
+        row = cur.fetchone()
+        conn.close()
+        if row:
+            # Keep the email-derived user_id (stable across uploads), but
+            # prefer the official name from Employee Master.
+            if row[1]:
+                pretty_name = row[1]
+    except Exception:
+        pass  # Employee Master may not exist yet on a fresh install
+
+    # Ensure users.csv row exists for this user_id
+    try:
+        df = load_users()
+        if user_id not in df["user_id"].astype(str).tolist():
+            # SSO users get an unguessable hash; they don't authenticate by password.
+            new_row = pd.DataFrame([{
+                "user_id": user_id,
+                "password_hash": hash_password(uuid.uuid4().hex + "-sso-only"),
+                "role": "Employee",
+                "first_login": "False",   # no password change required for SSO
+                "active": "True",
+                "display_name": pretty_name or user_id,
+            }])
+            df = pd.concat([df, new_row], ignore_index=True)
+            save_users(df)
+        else:
+            # Refresh display name if we learned a better one
+            idx = df[df["user_id"].astype(str) == user_id].index
+            if len(idx) and pretty_name and not df.loc[idx[0], "display_name"]:
+                df.loc[idx[0], "display_name"] = pretty_name
+                save_users(df)
+    except Exception:
+        pass
+
+    return user_id, pretty_name
+
+
 if not st.session_state.logged_in and not st.session_state.get("_rms_sso_tried"):
     st.session_state["_rms_sso_tried"] = True
-    _sso_user = None
+    _sso_email = None       # preferred identity
+    _sso_user = None        # legacy fallback identity
     _sso_name = None
     _sso_role = None
+    _sso_source = None      # "token" | "plain" — used for audit log
 
-    # Preferred: signed token
+    # 1. Preferred path: signed token
     if RMS_TOKEN_PARAM:
         _payload = _verify_rms_sso_token(RMS_TOKEN_PARAM)
         if _payload:
+            _sso_email = str(_payload.get("email", "")).strip().lower() or None
             _sso_user = str(_payload.get("user", "")).strip() or None
-            _sso_name = str(_payload.get("name", "")).strip() or _sso_user
-            _sso_role = str(_payload.get("role", "")).strip() or "Employee"
+            _sso_name = str(_payload.get("name", "")).strip() or None
+            _sso_role = str(_payload.get("role", "")).strip() or None
+            _sso_source = "token"
 
-    # Fallback (dev / pilot): plain user+role params — only honoured if
-    # RMS_ALLOW_PLAIN_SSO is true in st.secrets (off by default for safety).
-    if not _sso_user and RMS_USER_PARAM:
-        try:
-            _allow_plain = str(st.secrets.get("RMS_ALLOW_PLAIN_SSO", "")).lower() in ("1", "true", "yes")
-        except Exception:
-            _allow_plain = False
-        if _allow_plain:
+    # 2. Plain email param (?email=<koenig email>) — the standard RMS-integration
+    #    path. RMS passes the user's email in the URL and Strides logs them in.
+    #    Non-koenig domains are rejected below.
+    if not (_sso_email or _sso_user):
+        if RMS_EMAIL_PARAM:
+            _sso_email = RMS_EMAIL_PARAM.strip().lower()
+            _sso_name = RMS_NAME_PARAM or None
+            _sso_role = RMS_ROLE_PARAM or None
+            _sso_source = "plain"
+        elif RMS_USER_PARAM:
+            # Legacy fallback — RMS passing employee_id instead of email
             _sso_user = RMS_USER_PARAM
-            _sso_name = RMS_USER_PARAM
+            _sso_name = RMS_NAME_PARAM or RMS_USER_PARAM
             _sso_role = RMS_ROLE_PARAM or "Employee"
+            _sso_source = "plain"
 
-    if _sso_user:
+    # ---- Email-based SSO (primary path) ----
+    if _sso_email:
+        if not _is_allowed_koenig_email(_sso_email):
+            # Reject non-koenig domains silently — falls through to login screen.
+            try:
+                write_audit_log("SSO_REJECTED", target_id=_sso_email,
+                                details=f"reason=non_koenig_domain; source={_sso_source}")
+            except Exception:
+                pass
+        else:
+            _resolved_user_id, _resolved_name = _link_or_create_sso_employee(_sso_email, _sso_name)
+            if _resolved_user_id:
+                # Role: explicit Admin from token wins; else check admin-email list; else Employee.
+                _role = "Employee"
+                if _sso_role and _sso_role.strip().lower() == "admin":
+                    _role = "Admin"
+                elif _is_admin_email(_sso_email):
+                    _role = "Admin"
+
+                st.session_state.logged_in = True
+                st.session_state.role = _role
+                st.session_state.employee_id = _resolved_user_id
+                st.session_state.employee_name = _resolved_name or _resolved_user_id
+                st.session_state.employee_email = _sso_email
+                st.session_state.must_change_password = False
+                st.session_state.start_completed = True  # SSO users skip the start-here gate
+                try:
+                    write_audit_log("SSO_LOGIN", target_id=_sso_email,
+                                    details=f"role={_role}; source={_sso_source}")
+                except Exception:
+                    pass
+
+    # ---- Legacy ID-based SSO (kept for back-compat with older RMS tile URLs) ----
+    elif _sso_user:
+        ensure_employee_exists(_sso_user)
         st.session_state.logged_in = True
         st.session_state.role = _sso_role if _sso_role in ("Admin", "Employee") else "Employee"
         st.session_state.employee_id = _sso_user
         st.session_state.employee_name = _sso_name or _sso_user
         st.session_state.must_change_password = False
-        st.session_state.start_completed = True  # RMS users skip the start-here gate
-        # Optional: deep-link to a panel
-        if DEEP_LINK_PANEL:
-            _panel_map = {
-                "home": "Home",
-                "start-here": "Start Here",
-                "ask-strides": "Ask Strides",
-                "ask-sarika": "Ask Strides",  # legacy alias — keeps old RMS tile URLs working
-                "employee-declaration": "Employee Declaration",
-                "investment-declaration": "Tax Regime & Investment Declaration",
-                "tax-declaration": "Tax Regime & Investment Declaration",
-                "my-tax-snapshot": "My Tax Snapshot",
-                "payroll-tax-engine": "Payroll Tax Engine",
-                "declaration-approval": "Declaration Approval",
-                "user-management": "User Management",
-                "knowledge-base": "Knowledge Base",
-                "question-analytics": "Question Analytics",
-                "admin-analytics": "Admin Analytics",
-                "spoc": "SPOC",
-            }
-            _resolved = _panel_map.get(DEEP_LINK_PANEL.lower())
-            if _resolved:
-                st.session_state.selected_panel = _resolved
+        st.session_state.start_completed = True
+    # Optional: deep-link to a panel (applies if any SSO path succeeded)
+    if st.session_state.logged_in and DEEP_LINK_PANEL:
+        _panel_map = {
+            "home": "Home",
+            "start-here": "Start Here",
+            "ask-strides": "Ask Strides",
+            "ask-sarika": "Ask Strides",  # legacy alias — keeps old RMS tile URLs working
+            "user-management": "User Management",
+            "knowledge-base": "Knowledge Base",
+            "question-analytics": "Question Analytics",
+            "admin-analytics": "Admin Analytics",
+            "spoc": "SPOC",
+        }
+        _resolved = _panel_map.get(DEEP_LINK_PANEL.lower())
+        if _resolved:
+            st.session_state.selected_panel = _resolved
 
+    # ---- Strip sensitive params from the URL after SSO succeeds ----
+    # Removes ?email=, ?token=, ?user=, ?role=, ?name= from the address bar
+    # so the email doesn't sit in browser history / get shoulder-surfed.
+    # `embed`, `panel`, and `admin` are kept (they're not sensitive).
+    if st.session_state.logged_in:
+        try:
+            kept = {}
+            for k in ("embed", "panel"):
+                v = _qp.get(k)
+                if v:
+                    kept[k] = v
+            # Clear all query params, then set back only the safe ones.
+            try:
+                st.query_params.clear()
+                for k, v in kept.items():
+                    st.query_params[k] = v
+            except Exception:
+                # Older Streamlit versions — best-effort fallback
+                try:
+                    st.experimental_set_query_params(**kept)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+# -----------------------------------------------------
+# Access gate
+#   • If SSO succeeded → already logged in, fall through.
+#   • If admin override (?admin=true) → show admin login form.
+#   • Otherwise → show 'Please open via RMS' page (no employee login).
+# -----------------------------------------------------
 if not st.session_state.logged_in:
-    login_screen()
+    if ADMIN_OVERRIDE:
+        login_screen()
+    else:
+        _render_rms_only_gate()
     st.stop()
 
 if st.session_state.must_change_password:
@@ -1542,10 +1790,48 @@ def semantic_search(query, top_k=3):
     temp["similarity"] = scores
     return temp.sort_values("similarity", ascending=False).head(top_k)
 
-def generate_response(query, results):
+# ----- Out-of-scope / chitchat detector -----
+# When a query doesn't look like a tax/HR/finance question, we let the AI
+# respond casually (without strict KB constraints) so employees can chat
+# naturally. Examples: 'hello', 'how are you', 'tell me a joke', 'weather'.
+_CHITCHAT_INDICATORS = (
+    "hello", "hi ", "hi!", "hey", "good morning", "good afternoon", "good evening",
+    "how are you", "how's it going", "thank", "thanks", "thx", "bye", "goodbye",
+    "joke", "weather", "who are you", "what is your name", "who made you",
+    "sing", "poem", "story", "fun fact", "how old", "your favourite",
+    "are you human", "are you a bot", "chatgpt", "openai",
+)
+_BUSINESS_DOMAIN_WORDS = (
+    "tax", "salary", "payroll", "hra", "nps", "80c", "80d", "pf", "epf",
+    "deduct", "regime", "form 16", "form 12", "tds", "pan", "ctc",
+    "declaration", "investment", "reimburse", "meal pass", "sodexo",
+    "leave", "holiday", "labour", "compliance", "entity", "koenig",
+    "spoc", "finance", "hr", "income", "refund", "itr",
+)
+
+
+def _looks_like_chitchat(text):
+    t = (text or "").lower().strip()
+    if not t:
+        return False
+    if any(b in t for b in _BUSINESS_DOMAIN_WORDS):
+        return False
+    return any(c in t for c in _CHITCHAT_INDICATORS) or len(t.split()) <= 3
+
+
+def generate_response(query, results, confidence="strong"):
+    """Strict KB-grounded answer. The model is FORBIDDEN from inventing facts.
+
+    confidence:
+      "strong" — the top FAQ is a confident match. Paraphrase it directly.
+      "medium" — the match is approximate. The model is told to BE EXPLICIT
+                   about that and hedge accordingly.
+
+    Returns (answer_text, is_ai_generated).
+    """
     top = results.iloc[0]
     if client is None:
-        return get_answer_text(top)
+        return get_answer_text(top), False
     context = ""
     for _, row in results.iterrows():
         context += f"""
@@ -1555,10 +1841,45 @@ Protected: {safe_get(row, 'Protected')}
 SPOC: {safe_get(row, 'SPOC Name')}
 Email: {safe_get(row, 'SPOC Email')}
 """
-    prompt = f"""
-You are Koenig Stride, an internal Tax & Entity Nexus Assistant.
-Use only the knowledge base below. Do not invent facts. If Protected is YES, do not reveal protected information and route employee to SPOC.
+    if confidence == "medium":
+        hedge_clause = (
+            "IMPORTANT: The Knowledge Base entries below are only an APPROXIMATE "
+            "match for the user's question — not an exact one. Follow these rules "
+            "strictly:\n"
+            "  • Begin your reply with: \"I don't have an exact answer for this, "
+            "but here's the closest relevant guidance from our records:\"\n"
+            "  • Then quote / paraphrase the most-relevant KB row(s).\n"
+            "  • End with: \"For a precise answer to your specific question, please "
+            "contact tax@koenig-solutions.com.\"\n"
+            "  • Do NOT invent details or sections that are not in the KB.\n"
+            "  • If none of the KB rows is even tangentially relevant, reply EXACTLY "
+            "with: \"This is not in our records. Please contact the Tax team at "
+            "tax@koenig-solutions.com.\"\n"
+        )
+    else:
+        hedge_clause = (
+            "The Knowledge Base below contains the relevant FAQ for the user's "
+            "question. Answer based on it directly.\n"
+        )
 
+    prompt = f"""You are **Koenig Stride**, an internal assistant for Koenig Solutions employees
+on Indian tax, payroll, HR, labour code, entity nexus and SPOC routing.
+
+STRICT RULES — follow without exception:
+
+1. Answer ONLY using the Knowledge Base provided below. Never invent facts,
+   never quote tax sections / dates / amounts that are not in the KB.
+2. If the KB does not clearly answer the question, reply EXACTLY with:
+   "This is not in our records. Please contact the Tax team at tax@koenig-solutions.com."
+3. If a KB row marked Protected=YES is the best match, do NOT reveal the answer.
+   Instead route the employee to the SPOC listed for that row.
+4. Do not give legal or financial advice. State that the answer is an internal
+   reference only.
+5. Keep answers concise (4-6 sentences) unless the user asks for detail.
+6. All amounts are in Indian Rupees (₹). Use Indian numbering format (1,50,000).
+7. The current Tax Year is FY 2026-27 under the Income-tax Act, 2025.
+
+{hedge_clause}
 Knowledge Base:
 {context}
 """
@@ -1566,17 +1887,54 @@ Knowledge Base:
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role":"system","content":prompt},{"role":"user","content":query}],
-            temperature=0.2
+            temperature=0.1,
         )
-        return resp.choices[0].message.content
+        return resp.choices[0].message.content, True
     except Exception:
-        return get_answer_text(top)
+        return get_answer_text(top), False
+
+
+def generate_chitchat_response(query):
+    """Free-form AI reply for out-of-scope / casual questions."""
+    if client is None:
+        return (
+            "I'm Strides, the Koenig assistant for tax, payroll, HR and SPOC queries. "
+            "How can I help?",
+            False,
+        )
+    prompt = (
+        "You are Strides, a friendly assistant for Koenig Solutions employees.\n"
+        "Keep replies short (1-3 sentences), warm, and appropriate for an office setting.\n"
+        "If asked about your identity, say you are Strides — Koenig's internal assistant "
+        "for tax, payroll, HR and SPOC queries.\n"
+        "Do NOT give legal, tax, or financial advice in this casual mode — if asked, "
+        "redirect the user to ask the same question with 'tax' or 'salary' in it."
+    )
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role":"system","content":prompt},{"role":"user","content":query}],
+            temperature=0.7,
+        )
+        return resp.choices[0].message.content, True
+    except Exception:
+        return (
+            "I'm Strides, the Koenig assistant for tax, payroll, HR and SPOC queries. "
+            "How can I help?",
+            False,
+        )
 
 # -----------------------------------------------------
 # QUERY LOGGING (for Question Analytics admin panel)
 # Threshold above which a query is considered "matched / in record"
-QUERY_LOG_MATCH_THRESHOLD = 0.35  # below this → weak match / not in record
-QUERY_LOG_MIN_THRESHOLD = 0.15    # below this → no answer at all
+# 3-tier confidence model for FAQ semantic search:
+#   >= STRONG  → high confidence: AI paraphrases the top FAQ directly
+#   >= MEDIUM  → medium confidence: AI uses top results BUT is told the match
+#                                    is approximate, so the reply is hedged
+#   <  MEDIUM  → weak / no good match: refuse to guess, return "not in records"
+QUERY_LOG_STRONG_THRESHOLD = 0.55
+QUERY_LOG_MATCH_THRESHOLD  = 0.40   # below this → weak / not in record
+QUERY_LOG_MIN_THRESHOLD    = 0.15   # below this → don't even try
 # -----------------------------------------------------
 
 
@@ -1650,36 +2008,459 @@ def log_query(query, response_type, top_row=None, similarity=0.0):
         pass
 
 
+# -----------------------------------------------------
+# LIVE TAX CALCULATOR (intercepts numeric salary questions before FAQ search)
+# -----------------------------------------------------
+
+# FY 2026-27 slabs — must match the values used elsewhere in the app.
+TAX_CALC_NEW_SLABS = [
+    (400000, 0.00), (800000, 0.05), (1200000, 0.10),
+    (1600000, 0.15), (2000000, 0.20), (2400000, 0.25),
+    (float("inf"), 0.30),
+]
+TAX_CALC_OLD_SLABS = [
+    (250000, 0.00), (500000, 0.05),
+    (1000000, 0.20), (float("inf"), 0.30),
+]
+TAX_CALC_NEW_STD_DED   = 75000
+TAX_CALC_OLD_STD_DED   = 50000
+TAX_CALC_CESS          = 0.04
+TAX_CALC_NEW_REBATE_UP = 1200000   # 87A under new regime: nil up to ₹12L taxable
+TAX_CALC_OLD_REBATE_UP = 500000    # 87A under old regime: nil up to ₹5L taxable
+
+
+def _parse_amount_with_unit(num_str, unit_str):
+    """Convert a raw number + optional Indian unit (lakh/lac/crore/L/cr) into rupees."""
+    try:
+        val = float(num_str.replace(",", ""))
+    except Exception:
+        return None
+    u = (unit_str or "").lower().strip()
+    if u in ("lakh", "lakhs", "lac", "lacs", "l"):
+        val *= 100000
+    elif u in ("crore", "crores", "cr"):
+        val *= 10000000
+    elif u in ("k", "thousand"):
+        val *= 1000
+    return val
+
+
+def _extract_amount_after(text, after_keywords):
+    """Find the first number that appears AFTER any of the given keywords.
+    Returns rupee value or None."""
+    pat = (
+        r"(?:" + "|".join(re.escape(k) for k in after_keywords) + r")"
+        r"[^\d]{0,40}"
+        r"(\d[\d,]*\.?\d*)\s*(lakh|lakhs|lac|lacs|crore|crores|cr|l|k|thousand)?"
+    )
+    m = re.search(pat, text, re.IGNORECASE)
+    if not m:
+        return None
+    return _parse_amount_with_unit(m.group(1), m.group(2))
+
+
+def _extract_salary(text):
+    """Detect the primary salary figure mentioned in `text`.
+
+    Heuristics, in priority order:
+      1. Number immediately after 'salary' / 'income' / 'CTC' / 'gross' / 'package' / 'earn'.
+      2. The LARGEST standalone amount in the sentence (ignoring small numbers <₹1L,
+         which are almost always deduction figures, not salary).
+
+    Returns the rupee value, or None if no plausible salary found.
+    """
+    text = text or ""
+    # Priority 1: explicit salary keyword
+    for kw in ["salary", "income", "ctc", "gross", "package", "earn",
+               "earning", "earnings", "compensation", "pay"]:
+        v = _extract_amount_after(text, [kw])
+        if v and v >= 100000:    # at least ₹1L to be a plausible annual salary
+            return v
+
+    # Priority 2: largest standalone amount
+    candidates = []
+    for m in re.finditer(
+        r"(?<![\d.])(\d[\d,]*\.?\d*)\s*(lakh|lakhs|lac|lacs|crore|crores|cr|l|k|thousand)?",
+        text, re.IGNORECASE,
+    ):
+        v = _parse_amount_with_unit(m.group(1), m.group(2))
+        if v and v >= 100000:
+            candidates.append(v)
+    return max(candidates) if candidates else None
+
+
+# Section→ (display name, max cap in rupees, kind)
+# kind: 'old' → only in Old regime; 'both' → allowed in both regimes
+_DEDUCTION_PATTERNS = [
+    # 80C and substitutes
+    ("80c",      "Section 80C",          150000, "old"),
+    ("pf",       "PF (under 80C)",       150000, "old"),
+    ("ppf",      "PPF (under 80C)",      150000, "old"),
+    ("elss",     "ELSS (under 80C)",     150000, "old"),
+    ("lic",      "LIC premium (80C)",    150000, "old"),
+    # 80D health insurance
+    ("80d",      "Section 80D (health insurance)", 100000, "old"),
+    ("mediclaim","Mediclaim (80D)",      100000, "old"),
+    # NPS (additional)
+    ("80ccd(1b)","NPS 80CCD(1B)",         50000, "old"),
+    ("80ccd1b",  "NPS 80CCD(1B)",         50000, "old"),
+    # NPS (employer) — ALLOWED in NEW regime too
+    ("80ccd(2)", "Employer NPS 80CCD(2)", 99999999, "both"),
+    ("80ccd2",   "Employer NPS 80CCD(2)", 99999999, "both"),
+    ("employer nps", "Employer NPS 80CCD(2)", 99999999, "both"),
+    # Home loan interest — Section 24(b)
+    ("home loan",       "Home Loan Interest (24b)", 200000, "old"),
+    ("home-loan",       "Home Loan Interest (24b)", 200000, "old"),
+    ("housing loan",    "Home Loan Interest (24b)", 200000, "old"),
+    ("24(b)",           "Home Loan Interest (24b)", 200000, "old"),
+    # HRA
+    ("hra",             "HRA exemption",            99999999, "old"),
+    ("house rent",      "HRA exemption",            99999999, "old"),
+    # Education loan
+    ("80e",             "Section 80E (education loan)", 99999999, "old"),
+    ("education loan",  "Section 80E (education loan)", 99999999, "old"),
+    # Donation
+    ("80g",             "Section 80G (donation)",   99999999, "old"),
+    ("donation",        "Section 80G (donation)",   99999999, "old"),
+    # LTA
+    ("lta",             "LTA exemption",            99999999, "old"),
+    ("leave travel",    "LTA exemption",            99999999, "old"),
+    # Meal Passes / Sodexo — ALLOWED in NEW regime too
+    ("meal pass",       "Meal Passes / Sodexo",     26400, "both"),
+    ("meal passes",     "Meal Passes / Sodexo",     26400, "both"),
+    ("sodexo",          "Meal Passes / Sodexo",     26400, "both"),
+]
+
+
+def _extract_deductions(text):
+    """Return a list of {section, name, amount, kind} dicts found in the text.
+
+    Matching rules:
+      • Keyword must occur as a WHOLE WORD (no substring matches — e.g. '80c' must
+        not match inside '80ccd(2)').
+      • Find a nearby number (after first, then before; within ~40 chars).
+        The number must be ≥ 1000 to avoid grabbing stray digits from "80CCD(2)".
+        If no explicit amount mentioned, assume the FULL cap (assumed=True).
+      • Cap at the section's statutory limit.
+      • Dedupe by display name; first occurrence wins.
+    """
+    text = (text or "").lower()
+    found = {}
+    # Process keywords longest-first so '80ccd(2)' is consumed before '80c'.
+    for kw, name, cap, kind in sorted(_DEDUCTION_PATTERNS, key=lambda x: -len(x[0])):
+        kw_re = re.escape(kw)
+        # Whole-word boundary: not preceded/followed by alphanumerics that
+        # would extend the keyword (e.g. '80c' inside '80ccd').
+        # We treat the keyword start/end as boundaries against [a-z0-9].
+        boundary = r"(?<![a-z0-9])" + kw_re + r"(?![a-z0-9])"
+        if not re.search(boundary, text):
+            continue
+        # Number AFTER the keyword (within 40 chars)
+        pat_after = boundary + r"[^\d]{0,40}(\d[\d,]*\.?\d*)\s*(lakh|lakhs|lac|lacs|crore|crores|cr|l|k|thousand)?"
+        m = re.search(pat_after, text)
+        amount, assumed = None, False
+        if m:
+            v = _parse_amount_with_unit(m.group(1), m.group(2))
+            # Reject tiny stray numbers (likely a section number, not an amount)
+            if v is not None and v >= 1000:
+                amount = v
+        if amount is None:
+            # Number BEFORE the keyword
+            pat_before = r"(\d[\d,]*\.?\d*)\s*(lakh|lakhs|lac|lacs|crore|crores|cr|l|k|thousand)?[^\d]{0,40}" + boundary
+            m2 = re.search(pat_before, text)
+            if m2:
+                v = _parse_amount_with_unit(m2.group(1), m2.group(2))
+                if v is not None and v >= 1000:
+                    amount = v
+        if amount is None:
+            amount = cap
+            assumed = True
+        amount = min(amount, cap)
+        if name not in found:
+            found[name] = {"name": name, "amount": amount, "kind": kind, "assumed": assumed}
+    return list(found.values())
+
+
+def _tax_from_slabs(taxable, slabs):
+    if taxable <= 0:
+        return 0.0
+    prev, tax = 0, 0.0
+    for cap, rate in slabs:
+        slice_ = min(taxable, cap) - prev
+        if slice_ > 0:
+            tax += slice_ * rate
+        if taxable <= cap:
+            break
+        prev = cap
+    return tax
+
+
+def _compute_regime_breakup(gross, regime, deductions):
+    """Return a dict with the full step-by-step computation for one regime."""
+    if regime == "New":
+        std_ded = TAX_CALC_NEW_STD_DED
+        # Only deductions with kind='both' apply under New regime.
+        applicable = [d for d in deductions if d["kind"] == "both"]
+        slabs = TAX_CALC_NEW_SLABS
+        rebate_cap = TAX_CALC_NEW_REBATE_UP
+    else:
+        std_ded = TAX_CALC_OLD_STD_DED
+        applicable = list(deductions)
+        slabs = TAX_CALC_OLD_SLABS
+        rebate_cap = TAX_CALC_OLD_REBATE_UP
+
+    ded_total = sum(d["amount"] for d in applicable)
+    taxable = max(0, gross - std_ded - ded_total)
+    tax = _tax_from_slabs(taxable, slabs)
+    rebate_applied = False
+    if taxable <= rebate_cap:
+        tax = 0.0
+        rebate_applied = True
+    cess = tax * TAX_CALC_CESS
+    total = round(tax + cess)
+    return {
+        "regime": regime,
+        "std_ded": std_ded,
+        "deductions": applicable,
+        "deductions_total": ded_total,
+        "taxable": taxable,
+        "tax": round(tax),
+        "cess": round(cess),
+        "total": total,
+        "rebate_applied": rebate_applied,
+    }
+
+
+def _format_inr(amount):
+    return f"₹{amount:,.0f}"
+
+
+def _render_calc_answer(gross, new_r, old_r, deductions):
+    """Build a markdown answer comparing both regimes side-by-side."""
+    lines = [
+        f"### Tax computation for annual gross salary {_format_inr(gross)} (FY 2026-27)",
+        "",
+    ]
+    if deductions:
+        lines.append("**Deductions detected in your question:**")
+        for d in deductions:
+            note = " *(assumed full limit — mention the amount for accuracy)*" if d["assumed"] else ""
+            badge = "both regimes" if d["kind"] == "both" else "old regime only"
+            lines.append(f"- {d['name']}: {_format_inr(d['amount'])}  _({badge}){note}_")
+        lines.append("")
+    else:
+        lines.append("_No specific deductions mentioned. Old-regime numbers below assume NO investments. To get a tailored Old-regime result, mention your 80C / 80D / HRA / home-loan / NPS amounts._")
+        lines.append("")
+
+    def _section(label, r):
+        out = [f"#### {label}"]
+        out.append(f"- Standard deduction: {_format_inr(r['std_ded'])}")
+        if r["deductions"]:
+            out.append(f"- Other deductions applied: {_format_inr(r['deductions_total'])}")
+        else:
+            out.append("- Other deductions applied: ₹0 *(none allowed under this regime)*" if r["regime"] == "New" else "- Other deductions applied: ₹0")
+        out.append(f"- **Taxable income: {_format_inr(r['taxable'])}**")
+        if r["rebate_applied"]:
+            out.append("- Slab tax: nil after Section 87A rebate")
+        else:
+            out.append(f"- Slab tax: {_format_inr(r['tax'])}")
+            out.append(f"- Health & education cess (4%): {_format_inr(r['cess'])}")
+        out.append(f"- **Total tax payable: {_format_inr(r['total'])}**")
+        return "\n".join(out)
+
+    lines.append(_section("🆕 New Tax Regime", new_r))
+    lines.append("")
+    lines.append(_section("📜 Old Tax Regime", old_r))
+    lines.append("")
+
+    diff = old_r["total"] - new_r["total"]
+    if diff > 0:
+        lines.append(f"✅ **New Regime saves you {_format_inr(diff)}** over the Old regime in this scenario.")
+    elif diff < 0:
+        lines.append(f"✅ **Old Regime saves you {_format_inr(-diff)}** over the New regime in this scenario.")
+    else:
+        lines.append("⚖️ Both regimes give the same tax in this scenario.")
+
+    lines.append("")
+    lines.append("---")
+    lines.append("_This is an estimate based only on what you typed. For your exact liability, consult the Tax team at tax@koenig-solutions.com._")
+
+    return "\n".join(lines)
+
+
+# Words that, when present alongside a salary-like number, indicate a tax
+# computation request. Kept broad so conversational follow-ups still match.
+_TAX_TRIGGER_WORDS = (
+    "tax", "taxable", "liability", "how much", "calculate", "calc",
+    "regime", "deduct", "pay", "payable",
+    # Conversational / follow-up hints
+    "income", "salary", "ctc", "package", "earning", "earn",
+    "if ", "what if", "and if", "compute",
+)
+
+
+def _looks_like_tax_question(text):
+    """Cheap intent check — the user is asking about tax on a salary number."""
+    t = (text or "").lower()
+    return any(w in t for w in _TAX_TRIGGER_WORDS)
+
+
+def _last_turn_was_tax_calc():
+    """Return True iff the most recent assistant message was a tax computation.
+
+    Used to treat follow-up numeric questions (e.g. "and if income is 30 lakh?")
+    as calculator queries even when the trigger words are absent.
+    """
+    history = st.session_state.get("chat_history", [])
+    for item in reversed(history):
+        if item.get("type") == "answer" and item.get("source") == "Live Tax Calculator":
+            return True
+        if item.get("type") in ("answer", "protected", "not_found", "ai_answer"):
+            return False    # only count the most recent assistant turn
+    return False
+
+
+def _last_calc_deductions():
+    """Return the deductions list from the most recent tax-calc turn (or []).
+    Allows follow-up questions to inherit previously-mentioned 80C / HRA / etc."""
+    return list(st.session_state.get("_last_calc_deductions", []) or [])
+
+
+def try_tax_calculator(query):
+    """If `query` is a numeric tax question, return a computed answer + an
+    inheritance note. Else return None.
+    """
+    has_intent = _looks_like_tax_question(query)
+    follow_up  = _last_turn_was_tax_calc()
+    if not (has_intent or follow_up):
+        return None
+    gross = _extract_salary(query)
+    if not gross or gross < 100000:
+        return None
+
+    deductions = _extract_deductions(query)
+    inherited_note = ""
+    # If this is a follow-up and the user didn't restate any deductions,
+    # carry over the deductions from the previous tax-calc turn.
+    if follow_up and not deductions:
+        inherited = _last_calc_deductions()
+        if inherited:
+            deductions = inherited
+            names = ", ".join(d["name"] for d in inherited)
+            inherited_note = (
+                f"\n\n_\u2139\ufe0f Re-using deductions from your previous question: "
+                f"{names}. Mention different amounts in your next question to override._"
+            )
+
+    new_r = _compute_regime_breakup(gross, "New", deductions)
+    old_r = _compute_regime_breakup(gross, "Old", deductions)
+    answer = _render_calc_answer(gross, new_r, old_r, deductions) + inherited_note
+
+    # Remember the deductions for the next follow-up turn
+    st.session_state["_last_calc_deductions"] = deductions
+    return answer
+
+
 def submit_query(query):
+    # 1. Try the live tax calculator first — if it produces a numeric answer,
+    #    return it directly without going through FAQ search.
+    calc_answer = try_tax_calculator(query)
+    if calc_answer is not None:
+        st.session_state.chat_history.append({
+            "query": query,
+            "type": "answer",
+            "answer": calc_answer,
+            "similarity": 1.0,
+            "source": "Live Tax Calculator",
+        })
+        # Log as a successful, in-record answer
+        try:
+            _ensure_query_log_table()
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            cur.execute(
+                """INSERT INTO query_log (
+                    asked_at, employee_id, employee_name, query,
+                    matched, in_record, matched_faq_id, matched_category,
+                    matched_question, similarity, response_type, source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    str(st.session_state.get("employee_id", "") or ""),
+                    str(st.session_state.get("employee_name", "") or ""),
+                    str(query)[:1000],
+                    1, 1, "calc", "Tax Calculator", "Tax computation",
+                    1.0, "answer", "Live Tax Calculator",
+                ),
+            )
+            conn.commit(); conn.close()
+        except Exception:
+            pass
+        return
+
+    # 2. Chitchat / out-of-scope — let the AI answer casually (with banner).
+    if _looks_like_chitchat(query):
+        ans, _ai = generate_chitchat_response(query)
+        st.session_state.chat_history.append({
+            "query": query, "type": "answer",
+            "answer": ans, "similarity": 0.0,
+            "source": "AI (chitchat)", "ai_generated": True,
+            "chitchat": True,
+        })
+        log_query(query, "answer", None, 0.0)
+        return
+
+    # 3. Otherwise — strict KB-grounded answer via semantic search.
     results = semantic_search(query)
+    not_found_msg = (
+        "This is not in our records. Please contact the Tax team at "
+        "tax@koenig-solutions.com."
+    )
     if results.empty:
-        st.session_state.chat_history.append({"query":query,"type":"not_found","answer":"Knowledge base is not loaded.","similarity":0,"source":""})
+        st.session_state.chat_history.append({
+            "query": query, "type": "not_found",
+            "answer": "Knowledge base is not loaded. " + not_found_msg,
+            "similarity": 0, "source": "",
+        })
         log_query(query, "not_found", None, 0)
         return
     top = results.iloc[0]
     sim = float(top.get("similarity", 0))
-    if sim < QUERY_LOG_MIN_THRESHOLD:
-        st.session_state.chat_history.append({"query":query,"type":"not_found","answer":"I could not find a relevant answer. Please try differently or contact the relevant SPOC.","similarity":sim,"source":safe_get(top,"Source")})
+
+    # If the best match is too weak, refuse to guess.
+    if sim < QUERY_LOG_MATCH_THRESHOLD:
+        st.session_state.chat_history.append({
+            "query": query, "type": "not_found",
+            "answer": not_found_msg,
+            "similarity": sim, "source": safe_get(top, "Source"),
+        })
         log_query(query, "not_found", top, sim)
         return
-    if sim < QUERY_LOG_MATCH_THRESHOLD:
-        # Weak match — we still try to answer, but flag as 'not in record'
-        if is_protected(top):
-            spoc, email = get_spoc(top)
-            st.session_state.chat_history.append({"query":query,"type":"protected","answer":"This information is protected and cannot be displayed here.","spoc":spoc,"email":email,"similarity":sim,"source":safe_get(top,"Source")})
-            log_query(query, "weak_match", top, sim)
-            return
-        ans = generate_response(query, results)
-        st.session_state.chat_history.append({"query":query,"type":"answer","answer":ans,"similarity":sim,"source":safe_get(top,"Source")})
-        log_query(query, "weak_match", top, sim)
-        return
+
+    # Protected route (regardless of confidence tier)
     if is_protected(top):
         spoc, email = get_spoc(top)
-        st.session_state.chat_history.append({"query":query,"type":"protected","answer":"This information is protected and cannot be displayed here.","spoc":spoc,"email":email,"similarity":sim,"source":safe_get(top,"Source")})
+        st.session_state.chat_history.append({
+            "query": query, "type": "protected",
+            "answer": "This information is protected and cannot be displayed here.",
+            "spoc": spoc, "email": email,
+            "similarity": sim, "source": safe_get(top, "Source"),
+        })
         log_query(query, "protected", top, sim)
         return
-    ans = generate_response(query, results)
-    st.session_state.chat_history.append({"query":query,"type":"answer","answer":ans,"similarity":sim,"source":safe_get(top,"Source")})
+
+    # Three-tier answer:
+    #   ≥ STRONG threshold → AI paraphrases directly
+    #   between MATCH and STRONG → AI gives a HEDGED answer (explicitly says "not exact")
+    confidence = "strong" if sim >= QUERY_LOG_STRONG_THRESHOLD else "medium"
+    ans, ai_used = generate_response(query, results, confidence=confidence)
+    st.session_state.chat_history.append({
+        "query": query, "type": "answer",
+        "answer": ans, "similarity": sim,
+        "source": safe_get(top, "Source"),
+        "ai_generated": ai_used,
+        "confidence": confidence,
+    })
     log_query(query, "answer", top, sim)
 
 
@@ -1701,197 +2482,73 @@ def add_column_if_missing(cur, table_name, column_name, column_definition):
         cur.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}")
 
 
-# Note: do NOT cache init_payroll_database with @st.cache_resource. On Streamlit
-# Cloud the filesystem is ephemeral — the DB file can be wiped between runs while
-# the in-memory cache survives, causing "no such table" errors. Instead, the
-# function is cheap (uses CREATE TABLE IF NOT EXISTS) and safe to call often.
-def init_payroll_database():
-    conn = get_db_connection()
-    cur = conn.cursor()
+def _drop_legacy_payroll_tables_once():
+    """One-time cleanup: drop the obsolete payroll/declaration tables that were
+    removed in May 2026.
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS salary_structure_master (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            component_name TEXT NOT NULL UNIQUE,
-            component_type TEXT DEFAULT 'Allowance',
-            formula_type TEXT DEFAULT 'Fixed',
-            percentage REAL DEFAULT 0,
-            max_limit REAL DEFAULT 0,
-            basis TEXT DEFAULT 'Yearly',
-            taxable_status TEXT DEFAULT 'Taxable',
-            proof_required INTEGER DEFAULT 0,
-            enabled INTEGER DEFAULT 1,
-            sort_order INTEGER DEFAULT 0,
-            remarks TEXT DEFAULT '',
-            updated_at TEXT DEFAULT ''
+    Tables: employee_master, employee_salary_monthly, employee_pli_monthly,
+            employee_tds_monthly, employee_tax_computation, employee_investments,
+            salary_structure_master.
+
+    Idempotent and safe — each table is dropped via DROP TABLE IF EXISTS.
+    """
+    if st.session_state.get("_legacy_tables_dropped"):
+        return
+    st.session_state["_legacy_tables_dropped"] = True
+    legacy_tables = [
+        "employee_master",
+        "employee_salary_monthly",
+        "employee_pli_monthly",
+        "employee_tds_monthly",
+        "employee_tax_computation",
+        "employee_investments",
+        "salary_structure_master",
+    ]
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        for t in legacy_tables:
+            try:
+                cur.execute(f"DROP TABLE IF EXISTS {t}")
+            except Exception:
+                pass
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+# Run the one-time drop on every fresh session — cheap, idempotent.
+_drop_legacy_payroll_tables_once()
+
+
+def _ensure_audit_log_table():
+    """Create the audit_log table if it does not yet exist. Idempotent."""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT,
+                actor_id TEXT,
+                actor_role TEXT,
+                action TEXT,
+                target_id TEXT,
+                details TEXT
+            )"""
         )
-    """)
-
-    # Upgrade old DB if table already existed from previous version
-    add_column_if_missing(cur, "salary_structure_master", "proof_required", "INTEGER DEFAULT 0")
-    add_column_if_missing(cur, "salary_structure_master", "enabled", "INTEGER DEFAULT 1")
-    add_column_if_missing(cur, "salary_structure_master", "sort_order", "INTEGER DEFAULT 0")
-    add_column_if_missing(cur, "salary_structure_master", "remarks", "TEXT DEFAULT ''")
-    add_column_if_missing(cur, "salary_structure_master", "updated_at", "TEXT DEFAULT ''")
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS employee_master (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            employee_id TEXT UNIQUE,
-            employee_name TEXT,
-            tax_regime TEXT,
-            pan_no TEXT,
-            gender TEXT,
-            date_of_joining TEXT,
-            date_of_exit TEXT,
-            dob TEXT,
-            designation TEXT,
-            uploaded_at TEXT DEFAULT ''
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS employee_salary_monthly (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            employee_id TEXT,
-            employee_name TEXT,
-            financial_year TEXT,
-            salary_month TEXT,
-            gross_salary REAL DEFAULT 0,
-            basic REAL DEFAULT 0,
-            hra REAL DEFAULT 0,
-            sodexo_meal_passes REAL DEFAULT 0,
-            telephone_internet REAL DEFAULT 0,
-            electricity_reimbursement REAL DEFAULT 0,
-            professional_software REAL DEFAULT 0,
-            skill_development REAL DEFAULT 0,
-            power_utility_allowance REAL DEFAULT 0,
-            taxable_allowance REAL DEFAULT 0,
-            ot_pli_profit_sharing REAL DEFAULT 0,
-            exgratia REAL DEFAULT 0,
-            gratuity REAL DEFAULT 0,
-            severance REAL DEFAULT 0,
-            leave_encashment REAL DEFAULT 0,
-            referral_bonus REAL DEFAULT 0,
-            other_adjustment REAL DEFAULT 0,
-            total_income_from_salary REAL DEFAULT 0,
-            uploaded_at TEXT DEFAULT ''
-        )
-    """)
-
-    # Dedicated PLI / Incentive / Bonus monthly table — keeps incentive
-    # payouts separate from base salary for cleaner tax computation.
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS employee_pli_monthly (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            employee_id TEXT,
-            employee_name TEXT,
-            financial_year TEXT,
-            salary_month TEXT,
-            pli_amount REAL DEFAULT 0,
-            incentive_amount REAL DEFAULT 0,
-            performance_bonus REAL DEFAULT 0,
-            profit_sharing REAL DEFAULT 0,
-            other_variable_pay REAL DEFAULT 0,
-            total_variable_pay REAL DEFAULT 0,
-            remarks TEXT DEFAULT '',
-            uploaded_at TEXT DEFAULT ''
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS employee_tds_monthly (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            employee_id TEXT,
-            employee_name TEXT,
-            financial_year TEXT,
-            salary_month TEXT,
-            tds_deducted REAL DEFAULT 0,
-            tax1_total_tax REAL DEFAULT 0,
-            tax2_cess_4_percent REAL DEFAULT 0,
-            tax3_total_tax_after_cess REAL DEFAULT 0,
-            tax4_total_deduction REAL DEFAULT 0,
-            tax5_net_deductible REAL DEFAULT 0,
-            uploaded_at TEXT DEFAULT ''
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS employee_investments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            employee_id TEXT,
-            employee_name TEXT,
-            financial_year TEXT,
-            declaration_type TEXT DEFAULT '',
-            section TEXT DEFAULT '',
-            investment_type TEXT DEFAULT '',
-            claimed_amount REAL DEFAULT 0,
-            approved_amount REAL DEFAULT 0,
-            status TEXT DEFAULT 'Pending',
-            proof_file TEXT DEFAULT '',
-            employee_remarks TEXT DEFAULT '',
-            admin_remarks TEXT DEFAULT '',
-            submitted_at TEXT DEFAULT '',
-            approved_at TEXT DEFAULT '',
-            approved_by TEXT DEFAULT ''
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS employee_tax_computation (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            employee_id TEXT,
-            employee_name TEXT,
-            financial_year TEXT,
-            gross_annual_salary REAL DEFAULT 0,
-            basic_salary REAL DEFAULT 0,
-            hra REAL DEFAULT 0,
-            sodexo_meal_passes REAL DEFAULT 0,
-            telephone_internet REAL DEFAULT 0,
-            electricity_reimbursement REAL DEFAULT 0,
-            professional_software REAL DEFAULT 0,
-            skill_development REAL DEFAULT 0,
-            power_utility_allowance REAL DEFAULT 0,
-            taxable_allowance REAL DEFAULT 0,
-            bonus_incentive REAL DEFAULT 0,
-            previous_employer_income_12b_12bb REAL DEFAULT 0,
-            total_income_from_salary REAL DEFAULT 0,
-            approved_allowances_reimbursements REAL DEFAULT 0,
-            standard_deduction REAL DEFAULT 0,
-            approved_investments REAL DEFAULT 0,
-            home_loan_deduction REAL DEFAULT 0,
-            other_eligible_deductions REAL DEFAULT 0,
-            taxable_salary REAL DEFAULT 0,
-            tax1_total_tax REAL DEFAULT 0,
-            tax2_cess_4_percent REAL DEFAULT 0,
-            tax3_total_tax_after_cess REAL DEFAULT 0,
-            tax4_total_deduction REAL DEFAULT 0,
-            tax5_net_deductible REAL DEFAULT 0,
-            computed_at TEXT DEFAULT ''
-        )
-    """)
-
-    # Audit log for sensitive actions (compliance / traceability)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS audit_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT DEFAULT '',
-            actor_id TEXT DEFAULT '',
-            actor_role TEXT DEFAULT '',
-            action TEXT DEFAULT '',
-            target_id TEXT DEFAULT '',
-            details TEXT DEFAULT ''
-        )
-    """)
-
-    conn.commit()
-    conn.close()
-    seed_salary_structure_master()
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_ts ON audit_log(timestamp)")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
 
 
 def write_audit_log(action, target_id="", details=""):
     """Record a sensitive action. Best-effort — never raises."""
     try:
+        _ensure_audit_log_table()
         actor_id = str(st.session_state.get("employee_id", "") or "")
         actor_role = str(st.session_state.get("role", "") or "")
         conn = get_db_connection()
@@ -1914,34 +2571,6 @@ def write_audit_log(action, target_id="", details=""):
         pass
 
 
-def seed_salary_structure_master():
-    conn = get_db_connection()
-    cur = conn.cursor()
-
-    default_rows = [
-        ("Basic", "Salary Component", "Manual / Upload", 0, 0, "Monthly", "Taxable", 0, 1, 1, "Base salary component"),
-        ("HRA", "Allowance", "50% of Basic", 50, 0, "Monthly", "Partial", 0, 1, 2, "HRA = 50% of Basic"),
-        ("Sodexo / Meal Passes", "Reimbursement", "Fixed", 0, 105600, "Yearly", "Conditional", 1, 1, 3, "Part of CTC; exempt up to approved declaration/proof amount"),
-        ("Telephone / Internet", "Reimbursement", "Percentage", 3, 0, "Yearly", "Conditional", 1, 1, 4, "Exempt up to approved proof amount"),
-        ("Electricity Reimbursement", "Reimbursement", "Percentage", 3, 0, "Yearly", "Conditional", 1, 1, 5, "Exempt up to approved proof amount"),
-        ("Professional / Software", "Reimbursement", "Percentage", 2, 0, "Yearly", "Conditional", 1, 1, 6, "Exempt up to approved proof amount"),
-        ("Skill Development", "Reimbursement", "Percentage", 2, 0, "Yearly", "Conditional", 1, 1, 7, "Exempt up to approved proof amount"),
-        ("Power & Utility Allowance", "Allowance", "Percentage", 2, 0, "Yearly", "Conditional", 1, 1, 8, "Exempt up to approved proof amount"),
-        ("Taxable Allowance", "Allowance", "Balance", 0, 0, "Monthly", "Taxable", 0, 1, 9, "Balance after configured components"),
-        ("Meal Passes / Sodexo Declaration", "Deduction", "Fixed", 0, 105600, "Yearly", "Conditional", 1, 1, 10, "Employee declaration/deduction head for meal passes; editable"),
-    ]
-
-    for row in default_rows:
-        cur.execute("""
-            INSERT OR IGNORE INTO salary_structure_master (
-                component_name, component_type, formula_type, percentage,
-                max_limit, basis, taxable_status, proof_required,
-                enabled, sort_order, remarks, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (*row, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-
-    conn.commit()
-    conn.close()
 
 
 def normalize_header(value):
@@ -2071,583 +2700,20 @@ def employee_id_value(row, col):
         return ""
 
 
-def load_salary_structure_master():
-    init_payroll_database()  # ensure table exists (no-op if already created)
-    conn = get_db_connection()
-    try:
-        df = pd.read_sql_query(
-            "SELECT * FROM salary_structure_master ORDER BY sort_order, id", conn
-        )
-    except Exception:
-        # Table missing or schema mismatch — force a fresh init and retry once
-        conn.close()
-        init_payroll_database()
-        conn = get_db_connection()
-        df = pd.read_sql_query(
-            "SELECT * FROM salary_structure_master ORDER BY sort_order, id", conn
-        )
-    conn.close()
-    return df
 
 
-def save_salary_structure_master(df):
-    save_df = df.copy().fillna("")
 
-    required_cols = [
-        "component_name", "component_type", "formula_type", "percentage",
-        "max_limit", "basis", "taxable_status", "proof_required",
-        "enabled", "sort_order", "remarks"
-    ]
 
-    for col in required_cols:
-        if col not in save_df.columns:
-            save_df[col] = ""
 
-    save_df["percentage"] = pd.to_numeric(save_df["percentage"], errors="coerce").fillna(0)
-    save_df["max_limit"] = pd.to_numeric(save_df["max_limit"], errors="coerce").fillna(0)
-    save_df["proof_required"] = save_df["proof_required"].apply(lambda x: 1 if str(x).lower() in ["1", "true", "yes", "required"] else 0)
-    save_df["enabled"] = save_df["enabled"].apply(lambda x: 1 if str(x).lower() in ["1", "true", "yes", "enabled"] else 0)
-    save_df["sort_order"] = pd.to_numeric(save_df["sort_order"], errors="coerce").fillna(0).astype(int)
-    save_df["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM salary_structure_master")
 
-    for _, row in save_df.iterrows():
-        component_name = str(row["component_name"]).strip()
-        if not component_name:
-            continue
 
-        cur.execute("""
-            INSERT INTO salary_structure_master (
-                component_name, component_type, formula_type, percentage,
-                max_limit, basis, taxable_status, proof_required,
-                enabled, sort_order, remarks, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            component_name,
-            str(row["component_type"]).strip(),
-            str(row["formula_type"]).strip(),
-            float(row["percentage"]),
-            float(row["max_limit"]),
-            str(row["basis"]).strip(),
-            str(row["taxable_status"]).strip(),
-            int(row["proof_required"]),
-            int(row["enabled"]),
-            int(row["sort_order"]),
-            str(row["remarks"]).strip(),
-            str(row["updated_at"]).strip(),
-        ))
 
-    conn.commit()
-    conn.close()
 
 
-def calculate_salary_split(annual_salary, basic_percent=40):
-    """
-    Auto salary split using salary_structure_master.
 
-    Important logic:
-    - Sodexo / Meal Passes is part of CTC.
-    - Deduction-type components like Meal Passes / Sodexo Declaration are not added to CTC breakup.
-    - Taxable Allowance is the balancing figure so total salary components equal Annual Salary / CTC.
-    """
-    structure_df = load_salary_structure_master()
-    annual_salary = float(annual_salary or 0)
-    basic = round(annual_salary * basic_percent / 100, 2)
 
-    result = {
-        "Annual Salary / CTC": annual_salary,
-        "Basic": basic,
-        "HRA": 0,
-        "Sodexo / Meal Passes": 0,
-        "Telephone / Internet": 0,
-        "Electricity Reimbursement": 0,
-        "Professional / Software": 0,
-        "Skill Development": 0,
-        "Power & Utility Allowance": 0,
-        "Taxable Allowance": 0,
-        "Total Salary Components": 0,
-        "Meal Passes / Sodexo Declaration": 0,
-    }
 
-    ctc_components = set([
-        "Basic",
-        "HRA",
-        "Sodexo / Meal Passes",
-        "Telephone / Internet",
-        "Electricity Reimbursement",
-        "Professional / Software",
-        "Skill Development",
-        "Power & Utility Allowance",
-        "Taxable Allowance",
-    ])
-
-    for _, row in structure_df.iterrows():
-        if int(row.get("enabled", 1)) != 1:
-            continue
-
-        component = str(row.get("component_name", "")).strip()
-        component_type = str(row.get("component_type", "")).strip().lower()
-        formula_type = str(row.get("formula_type", "")).strip().lower()
-        percentage = float(row.get("percentage", 0) or 0)
-        max_limit = float(row.get("max_limit", 0) or 0)
-
-        # Deduction/investment declaration heads are tracked separately;
-        # they should not increase CTC breakup.
-        if component_type == "deduction":
-            if component == "Meal Passes / Sodexo Declaration":
-                result[component] = round(max_limit, 2)
-            continue
-
-        if component == "Basic":
-            result[component] = basic
-
-        elif component == "HRA":
-            result[component] = round(basic * percentage / 100, 2)
-
-        elif component == "Taxable Allowance":
-            continue
-
-        elif formula_type == "fixed":
-            result[component] = round(max_limit, 2)
-
-        elif formula_type == "percentage":
-            calculated = annual_salary * percentage / 100
-            if max_limit > 0:
-                calculated = min(calculated, max_limit)
-            result[component] = round(calculated, 2)
-
-        elif formula_type == "50% of basic":
-            result[component] = round(basic * percentage / 100, 2)
-
-    component_total_before_taxable = sum(
-        amount for comp, amount in result.items()
-        if comp in ctc_components and comp != "Taxable Allowance"
-    )
-
-    result["Taxable Allowance"] = round(max(annual_salary - component_total_before_taxable, 0), 2)
-
-    result["Total Salary Components"] = round(
-        sum(amount for comp, amount in result.items() if comp in ctc_components),
-        2
-    )
-
-    return result
-
-
-def render_salary_structure_master_panel():
-    st.markdown("### 💼 Salary Structure Master")
-    st.caption("Edit Sodexo, HRA, reimbursements, allowances, proof rules and taxable status.")
-
-    st.info(
-        "Sodexo / Meal Passes is treated as part of CTC. "
-        "Meal Passes / Sodexo Declaration is also available as a separate editable deduction/declaration head. "
-        "Exemption will be considered only up to approved proof/declaration amount."
-    )
-
-    structure_df = load_salary_structure_master()
-
-    display_cols = [
-        "component_name", "component_type", "formula_type", "percentage",
-        "max_limit", "basis", "taxable_status", "proof_required",
-        "enabled", "sort_order", "remarks"
-    ]
-
-    edited_df = st.data_editor(
-        structure_df[display_cols],
-        use_container_width=True,
-        num_rows="dynamic",
-        hide_index=True,
-        key="salary_structure_editor",
-        column_config={
-            "component_name": st.column_config.TextColumn("Component", required=True),
-            "component_type": st.column_config.SelectboxColumn(
-                "Type",
-                options=["Salary Component", "Allowance", "Reimbursement", "Deduction", "Other"]
-            ),
-            "formula_type": st.column_config.SelectboxColumn(
-                "Formula",
-                options=["Manual / Upload", "Fixed", "Percentage", "50% of Basic", "Balance", "Formula"]
-            ),
-            "percentage": st.column_config.NumberColumn("Percentage", min_value=0.0, step=0.5),
-            "max_limit": st.column_config.NumberColumn("Max Limit", min_value=0.0, step=1000.0),
-            "basis": st.column_config.SelectboxColumn(
-                "Basis",
-                options=["Monthly", "Yearly", "Per Claim", "As Approved"]
-            ),
-            "taxable_status": st.column_config.SelectboxColumn(
-                "Taxable Status",
-                options=["Taxable", "Exempt", "Partial", "Conditional"]
-            ),
-            "proof_required": st.column_config.CheckboxColumn("Proof Required"),
-            "enabled": st.column_config.CheckboxColumn("Enabled"),
-            "sort_order": st.column_config.NumberColumn("Sort Order", min_value=0, step=1),
-            "remarks": st.column_config.TextColumn("Remarks"),
-        }
-    )
-
-    c1, c2, c3 = st.columns(3)
-
-    with c1:
-        if st.button("💾 Save Salary Structure", use_container_width=True):
-            save_salary_structure_master(edited_df)
-            st.success("Salary Structure Master saved successfully.")
-
-    with c2:
-        csv = edited_df.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            "⬇️ Download Structure CSV",
-            csv,
-            file_name="salary_structure_master.csv",
-            mime="text/csv",
-            use_container_width=True
-        )
-
-    with c3:
-        if st.button("🔄 Reload Default Components", use_container_width=True):
-            seed_salary_structure_master()
-            st.success("Default components checked/reloaded.")
-
-    st.markdown("---")
-    st.markdown("### 🧮 Auto Salary Split Preview")
-
-    c1, c2 = st.columns(2)
-    with c1:
-        annual_salary = st.number_input(
-            "Annual Salary / CTC",
-            min_value=0.0,
-            step=10000.0,
-            value=1200000.0
-        )
-    with c2:
-        basic_percent = st.number_input(
-            "Basic % of Annual Salary",
-            min_value=0.0,
-            max_value=100.0,
-            step=1.0,
-            value=40.0
-        )
-
-    if st.button("Calculate Salary Split", use_container_width=True):
-        split_result = calculate_salary_split(annual_salary, basic_percent)
-        split_df = pd.DataFrame(
-            [{"Component": k, "Annual Amount": v, "Monthly Amount": round(v / 12, 2)} for k, v in split_result.items()]
-        )
-        st.dataframe(split_df, use_container_width=True, hide_index=True)
-
-
-def import_employee_master(df):
-    emp_id_col = find_column(df, ["Employee ID", "EmployeeID", "Emp ID", "EmpCode", "Employee Code", "Emp Code"])
-    emp_name_col = find_column(df, ["Employee Name", "EmployeeName", "Name", "Emp Name"])
-    tax_regime_col = find_column(df, ["Tax Regime", "Regime"])
-    pan_col = find_column(df, ["PAN", "PAN No", "Pan No."])
-    gender_col = find_column(df, ["Gender"])
-    doj_col = find_column(df, ["Date of Joining", "DOJ"])
-    doe_col = find_column(df, ["Date of Exit", "DOE"])
-    dob_col = find_column(df, ["DOB", "Date of Birth"])
-    designation_col = find_column(df, ["Designation"])
-
-    if not emp_id_col:
-        return 0, "Employee ID column not found."
-
-    conn = get_db_connection()
-    cur = conn.cursor()
-    count = 0
-    skipped = 0
-
-    for _, row in df.iterrows():
-        employee_id = employee_id_value(row, emp_id_col)
-        if not employee_id:
-            skipped += 1
-            continue
-
-        cur.execute("""
-            INSERT OR REPLACE INTO employee_master (
-                employee_id, employee_name, tax_regime, pan_no, gender,
-                date_of_joining, date_of_exit, dob, designation, uploaded_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            employee_id,
-            text_value(row, emp_name_col),
-            text_value(row, tax_regime_col),
-            text_value(row, pan_col),
-            text_value(row, gender_col),
-            text_value(row, doj_col),
-            text_value(row, doe_col),
-            text_value(row, dob_col),
-            text_value(row, designation_col),
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        ))
-        count += 1
-
-    conn.commit()
-    conn.close()
-    return count, ""
-
-
-def import_salary_monthly(df, tax_year, salary_month, mode):
-    emp_id_col = find_column(df, ["Employee ID", "EmployeeID", "Emp ID", "EmpCode", "Employee Code", "Emp Code"])
-    emp_name_col = find_column(df, ["Employee Name", "EmployeeName", "Name", "Emp Name"])
-    gross_col = find_column(df, ["Gross Salary", "Gross", "Salary", "Annual Salary / CTC", "CTC"])
-    basic_col = find_column(df, ["Basic", "Basic Salary"])
-    hra_col = find_column(df, ["HRA"])
-    sodexo_col = find_column(df, ["Sodexo", "Meal Passes", "Meal Passess", "Sodexo / Meal Passes"])
-    tel_col = find_column(df, ["Telephone / Internet", "Telephone", "Internet"])
-    elec_col = find_column(df, ["Electricity Reimbursement", "Electricity"])
-    prof_col = find_column(df, ["Professional / Software", "Software", "Professional"])
-    skill_col = find_column(df, ["Skill Development"])
-    utility_col = find_column(df, ["Power & Utility Allowance", "Power Utility", "Utility Allowance"])
-    taxable_allowance_col = find_column(df, ["Taxable Allowance", "Taxable Allowances", "Special Allowance", "Special Allowances"])
-    # Use the full phrase to avoid "OT" matching "TotalDays".
-    ot_col = find_column(df, ["OT/PLI/Profit sharing", "OT PLI Profit Sharing", "Profit sharing"])
-    exgratia_col = find_column(df, ["EXGRATIA", "Exgratia", "Ex Gratia"])
-    gratuity_col = find_column(df, ["Gratuity"])
-    severance_col = find_column(df, ["Severance"])
-    leave_col = find_column(df, ["LeaveEncashment", "Leave Encashment"])
-    referral_col = find_column(df, ["Referralbonus", "Referral Bonus"])
-    other_col = find_column(df, ["OtherAdjustment", "Other Adjustment"])
-    # Use the full phrase only — the short alias "Salary" would clash with Gross.
-    # Use exact_only=True to disable fuzzy matching for this field specifically.
-    total_income_col = find_column(
-        df,
-        ["Total Income From Salary", "Total Income from Salary", "Net Payable", "NetPayable"],
-        exact_only=True,
-    )
-
-    if not emp_id_col:
-        detected_cols = ", ".join(str(c) for c in df.columns) or "(none)"
-        return 0, (
-            "❌ Employee ID column not found.\n\n"
-            "Looked for any of: Employee ID, EmployeeID, Emp ID, EmpCode, "
-            "Employee Code, Emp Code.\n\n"
-            f"**Columns detected in your sheet:** {detected_cols}"
-        )
-
-    conn = get_db_connection()
-    cur = conn.cursor()
-
-    if mode == "Overwrite Month":
-        cur.execute(
-            "DELETE FROM employee_salary_monthly WHERE financial_year = ? AND salary_month = ?",
-            (tax_year, salary_month)
-        )
-
-    count = 0
-    skipped = 0
-
-    for _, row in df.iterrows():
-        employee_id = employee_id_value(row, emp_id_col)
-        if not employee_id:
-            skipped += 1
-            continue
-
-        cur.execute("""
-            INSERT INTO employee_salary_monthly (
-                employee_id, employee_name, financial_year, salary_month,
-                gross_salary, basic, hra, sodexo_meal_passes,
-                telephone_internet, electricity_reimbursement,
-                professional_software, skill_development, power_utility_allowance,
-                taxable_allowance, ot_pli_profit_sharing, exgratia, gratuity,
-                severance, leave_encashment, referral_bonus, other_adjustment,
-                total_income_from_salary, uploaded_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            employee_id,
-            text_value(row, emp_name_col),
-            tax_year,
-            salary_month,
-            money_value(row, gross_col),
-            money_value(row, basic_col),
-            money_value(row, hra_col),
-            money_value(row, sodexo_col),
-            money_value(row, tel_col),
-            money_value(row, elec_col),
-            money_value(row, prof_col),
-            money_value(row, skill_col),
-            money_value(row, utility_col),
-            money_value(row, taxable_allowance_col),
-            money_value(row, ot_col),
-            money_value(row, exgratia_col),
-            money_value(row, gratuity_col),
-            money_value(row, severance_col),
-            money_value(row, leave_col),
-            money_value(row, referral_col),
-            money_value(row, other_col),
-            money_value(row, total_income_col),
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        ))
-        count += 1
-
-    conn.commit()
-    conn.close()
-    msg = ""
-    if count == 0:
-        msg = (
-            "⚠️ No rows were imported. Every row in the sheet had an empty "
-            f"Employee ID column ('{emp_id_col}'). "
-            "Check that the column has values starting from row 2."
-        )
-    elif skipped > 0:
-        msg = f"ℹ️ Skipped {skipped} row(s) with blank Employee ID."
-    return count, msg
-
-
-def import_pli_monthly(df, tax_year, salary_month, mode):
-    """Import a monthly PLI / Incentive / Bonus sheet."""
-    emp_id_col = find_column(df, ["Employee ID", "EmployeeID", "Emp ID", "EmpCode", "Employee Code", "Emp Code"])
-    emp_name_col = find_column(df, ["Employee Name", "EmployeeName", "Name", "Emp Name"])
-    pli_col = find_column(df, ["PLI", "PLI Amount", "Performance Linked Incentive"])
-    incentive_col = find_column(df, ["Incentive", "Incentive Amount", "Monthly Incentive"])
-    bonus_col = find_column(df, ["Performance Bonus", "Bonus", "Performance"])
-    profit_col = find_column(df, ["Profit Sharing", "Profit Share", "PS"])
-    other_col = find_column(df, ["Other Variable Pay", "Variable Pay", "Other Variable"])
-    total_col = find_column(df, ["Total Variable Pay", "Total Incentive", "Total PLI"], exact_only=True)
-    remarks_col = find_column(df, ["Remarks", "Notes", "Comments"])
-
-    if not emp_id_col:
-        detected_cols = ", ".join(str(c) for c in df.columns) or "(none)"
-        return 0, (
-            "❌ Employee ID column not found.\n\n"
-            "Looked for any of: Employee ID, EmployeeID, Emp ID, EmpCode, "
-            "Employee Code, Emp Code.\n\n"
-            f"**Columns detected in your sheet:** {detected_cols}"
-        )
-
-    conn = get_db_connection()
-    cur = conn.cursor()
-
-    if mode == "Overwrite Month":
-        cur.execute(
-            "DELETE FROM employee_pli_monthly WHERE financial_year = ? AND salary_month = ?",
-            (tax_year, salary_month),
-        )
-
-    count = 0
-    skipped = 0
-    for _, row in df.iterrows():
-        employee_id = employee_id_value(row, emp_id_col)
-        if not employee_id:
-            skipped += 1
-            continue
-        pli_amt = money_value(row, pli_col)
-        inc_amt = money_value(row, incentive_col)
-        bonus_amt = money_value(row, bonus_col)
-        profit_amt = money_value(row, profit_col)
-        other_amt = money_value(row, other_col)
-        # Auto-compute total if not explicitly provided in the sheet
-        explicit_total = money_value(row, total_col) if total_col else 0
-        total_amt = explicit_total if explicit_total > 0 else (pli_amt + inc_amt + bonus_amt + profit_amt + other_amt)
-
-        cur.execute(
-            """
-            INSERT INTO employee_pli_monthly (
-                employee_id, employee_name, financial_year, salary_month,
-                pli_amount, incentive_amount, performance_bonus, profit_sharing,
-                other_variable_pay, total_variable_pay, remarks, uploaded_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                employee_id,
-                text_value(row, emp_name_col),
-                tax_year,
-                salary_month,
-                pli_amt,
-                inc_amt,
-                bonus_amt,
-                profit_amt,
-                other_amt,
-                total_amt,
-                text_value(row, remarks_col),
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            ),
-        )
-        count += 1
-
-    conn.commit()
-    conn.close()
-    msg = ""
-    if count == 0:
-        msg = (
-            "⚠️ No rows were imported. Every row in the sheet had an empty "
-            f"Employee ID column ('{emp_id_col}')."
-        )
-    elif skipped > 0:
-        msg = f"ℹ️ Skipped {skipped} row(s) with blank Employee ID."
-    return count, msg
-
-
-def import_tds_monthly(df, tax_year, salary_month, mode):
-    emp_id_col = find_column(df, ["Employee ID", "EmployeeID", "Emp ID", "EmpCode", "Employee Code", "Emp Code"])
-    emp_name_col = find_column(df, ["Employee Name", "EmployeeName", "Name", "Emp Name"])
-    tds_col = find_column(df, ["Salary TDS", "TDS Deducted", "Tax Deducted", "TDS"])
-    tax1_col = find_column(df, ["Tax1", "Tax 1", "Total Tax"])
-    tax2_col = find_column(df, ["Tax2", "Tax 2", "Cess 4%", "Cess"])
-    tax3_col = find_column(df, ["Tax3", "Tax 3", "Total Tax After Cess"])
-    tax4_col = find_column(df, ["Tax4", "Tax 4", "Total Deduction"])
-    tax5_col = find_column(df, ["Tax5", "Tax 5", "Net Deductible"])
-
-    if not emp_id_col:
-        detected_cols = ", ".join(str(c) for c in df.columns) or "(none)"
-        return 0, (
-            "❌ Employee ID column not found.\n\n"
-            "Looked for any of: Employee ID, EmployeeID, Emp ID, EmpCode, "
-            "Employee Code, Emp Code.\n\n"
-            f"**Columns detected in your sheet:** {detected_cols}"
-        )
-
-    conn = get_db_connection()
-    cur = conn.cursor()
-
-    if mode == "Overwrite Month":
-        cur.execute(
-            "DELETE FROM employee_tds_monthly WHERE financial_year = ? AND salary_month = ?",
-            (tax_year, salary_month)
-        )
-
-    count = 0
-    skipped = 0
-
-    for _, row in df.iterrows():
-        employee_id = employee_id_value(row, emp_id_col)
-        if not employee_id:
-            skipped += 1
-            continue
-
-        cur.execute("""
-            INSERT INTO employee_tds_monthly (
-                employee_id, employee_name, financial_year, salary_month,
-                tds_deducted, tax1_total_tax, tax2_cess_4_percent,
-                tax3_total_tax_after_cess, tax4_total_deduction,
-                tax5_net_deductible, uploaded_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            employee_id,
-            text_value(row, emp_name_col),
-            tax_year,
-            salary_month,
-            money_value(row, tds_col),
-            money_value(row, tax1_col),
-            money_value(row, tax2_col),
-            money_value(row, tax3_col),
-            money_value(row, tax4_col),
-            money_value(row, tax5_col),
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        ))
-        count += 1
-
-    conn.commit()
-    conn.close()
-    msg = ""
-    if count == 0:
-        msg = (
-            "⚠️ No rows were imported. Every row in the sheet had an empty "
-            f"Employee ID column ('{emp_id_col}')."
-        )
-    elif skipped > 0:
-        msg = f"ℹ️ Skipped {skipped} row(s) with blank Employee ID."
-    return count, msg
 
 
 # ---- Standard month helpers (Indian Financial Year: April → March) ----
@@ -2657,26 +2723,8 @@ FY_MONTHS = [
 ]
 
 
-def current_fy_month_index():
-    """Return the index (0-11) into FY_MONTHS for the current calendar month.
-    April = 0, May = 1, … March = 11."""
-    cal_month = datetime.now().month  # 1=Jan … 12=Dec
-    # Mapping: Apr(4)->0, May(5)->1, ..., Dec(12)->8, Jan(1)->9, Feb(2)->10, Mar(3)->11
-    return (cal_month - 4) % 12
 
 
-def month_selectbox(label, key, default_index=None, help_text=None):
-    """A single reusable dropdown for picking an FY month.
-    Defaults to the current calendar month if no default_index is given."""
-    if default_index is None:
-        default_index = current_fy_month_index()
-    return st.selectbox(
-        label,
-        FY_MONTHS,
-        index=int(default_index),
-        key=key,
-        help=help_text or "Indian Financial Year months (April → March)",
-    )
 
 
 # ---- Excel template builder for upload panels ----
@@ -2706,161 +2754,10 @@ UPLOAD_TEMPLATES = {
 }
 
 
-def build_excel_template(columns, sheet_name="Template"):
-    """Return an in-memory .xlsx file containing one empty sheet with headers."""
-    buf = io.BytesIO()
-    df = pd.DataFrame(columns=columns)
-    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name=sheet_name[:31] or "Template")
-    buf.seek(0)
-    return buf.getvalue()
 
 
-def render_payroll_upload_engine():
-    st.markdown("### 📤 Payroll Upload Engine")
-    st.caption(
-        "Upload one file at a time. Switch the **Upload Type** dropdown below to "
-        "toggle between Employee Master, Salary Computation, PLI / Incentive, and TDS."
-    )
-
-    upload_type = st.selectbox(
-        "Upload Type",
-        ["Employee Master", "Salary Computation", "PLI / Incentive", "TDS Deduction"],
-        key="payroll_upload_type",
-        help=(
-            "Employee Master — employee directory (PAN, DOJ, Tax Regime, etc.)\n"
-            "Salary Computation — monthly fixed-pay components (Basic, HRA, reimbursements)\n"
-            "PLI / Incentive — monthly variable pay (PLI, incentives, bonus, profit-sharing)\n"
-            "TDS Deduction — monthly tax deducted at source"
-        ),
-    )
-
-    # Template download for the chosen upload type
-    template_cols = UPLOAD_TEMPLATES.get(upload_type, [])
-    if template_cols:
-        template_bytes = build_excel_template(template_cols, sheet_name=upload_type)
-        st.download_button(
-            label=f"📥 Download {upload_type} template (.xlsx)",
-            data=template_bytes,
-            file_name=f"koenig_stride_{upload_type.lower().replace(' ', '_')}_template.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-            key=f"tpl_dl_{upload_type}"
-        )
-        st.caption(
-            "Expected columns: " + ", ".join(template_cols)
-        )
-
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        tax_year = st.text_input("Tax Year", value="2026-27", key="payroll_upload_tax_year")
-    with c2:
-        salary_month = month_selectbox("Month", key="payroll_upload_month")
-    with c3:
-        mode = st.selectbox("Import Mode", ["Append", "Overwrite Month"], key="payroll_upload_mode")
-
-    uploaded_file = st.file_uploader(
-        "Upload Excel file",
-        type=["xlsx", "xls"],
-        key="payroll_excel_upload"
-    )
-
-    if uploaded_file is not None:
-        try:
-            xl = pd.ExcelFile(uploaded_file)
-            sheet_name = st.selectbox("Select Sheet", xl.sheet_names)
-            upload_df = pd.read_excel(uploaded_file, sheet_name=sheet_name).fillna("")
-
-            st.markdown("#### Preview")
-            st.dataframe(upload_df.head(50), use_container_width=True)
-            st.caption("Showing first 50 rows.")
-
-            st.markdown("#### Detected Columns")
-            st.write(", ".join([str(c) for c in upload_df.columns]))
-
-            if st.button("✅ Import to Database", use_container_width=True):
-                if upload_type == "Employee Master":
-                    count, err = import_employee_master(upload_df)
-                elif upload_type == "Salary Computation":
-                    count, err = import_salary_monthly(upload_df, tax_year, salary_month, mode)
-                elif upload_type == "PLI / Incentive":
-                    count, err = import_pli_monthly(upload_df, tax_year, salary_month, mode)
-                else:
-                    count, err = import_tds_monthly(upload_df, tax_year, salary_month, mode)
-
-                # Surface error first (a hard failure like missing Employee ID column)
-                if err and err.startswith("❌"):
-                    st.error(err)
-                elif count == 0:
-                    # Soft failure: function returned 0 rows imported
-                    st.error(
-                        f"❌ **0 rows imported** for {upload_type}.\n\n{err or ''}\n\n"
-                        "Check the preview above — the rows you expect to import "
-                        "may have a blank Employee ID, or there's a header-row "
-                        "mismatch. The data was **NOT** written to the database."
-                    )
-                else:
-                    st.success(
-                        f"✅ **{count} row(s) imported successfully** for {upload_type} "
-                        f"— Tax Year {tax_year}, Month {salary_month if upload_type != 'Employee Master' else '—'}."
-                    )
-                    if err:  # informational warning (e.g. skipped some rows)
-                        st.info(err)
-
-                    # Immediate verification: count rows actually in DB right now
-                    try:
-                        conn = get_db_connection()
-                        if upload_type == "Salary Computation":
-                            db_count = conn.execute(
-                                "SELECT COUNT(*) FROM employee_salary_monthly WHERE financial_year = ? AND salary_month = ?",
-                                (tax_year, salary_month),
-                            ).fetchone()[0]
-                            st.success(
-                                f"📊 **Verified:** {db_count} salary row(s) now stored for "
-                                f"{tax_year} / {salary_month}."
-                            )
-                        elif upload_type == "TDS Deduction":
-                            db_count = conn.execute(
-                                "SELECT COUNT(*) FROM employee_tds_monthly WHERE financial_year = ? AND salary_month = ?",
-                                (tax_year, salary_month),
-                            ).fetchone()[0]
-                            st.success(
-                                f"📊 **Verified:** {db_count} TDS row(s) now stored for "
-                                f"{tax_year} / {salary_month}."
-                            )
-                        elif upload_type == "PLI / Incentive":
-                            db_count = conn.execute(
-                                "SELECT COUNT(*) FROM employee_pli_monthly WHERE financial_year = ? AND salary_month = ?",
-                                (tax_year, salary_month),
-                            ).fetchone()[0]
-                            st.success(
-                                f"📊 **Verified:** {db_count} PLI row(s) now stored for "
-                                f"{tax_year} / {salary_month}."
-                            )
-                        else:
-                            db_count = conn.execute("SELECT COUNT(*) FROM employee_master").fetchone()[0]
-                            st.success(f"📊 **Verified:** {db_count} employees in master.")
-                        conn.close()
-                        st.info(
-                            "✅ Click **Payroll Data Preview** tab above to browse the imported data."
-                        )
-                    except Exception as ve:
-                        st.warning(f"Could not verify post-import count: {ve}")
-
-        except Exception as e:
-            st.error(f"Unable to process uploaded file: {e}")
 
 
-def _apply_month_year_filter(df, year_val, month_val):
-    """Filter a payroll df by financial_year and salary_month if user picked a value."""
-    if df.empty:
-        return df
-    out = df.copy()
-    if year_val and year_val != "All" and "financial_year" in out.columns:
-        out = out[out["financial_year"].astype(str) == str(year_val)]
-    if month_val and month_val != "All" and "salary_month" in out.columns:
-        out = out[out["salary_month"].astype(str) == str(month_val)]
-    return out
 
 
 # ----- Preview helpers: hide internal columns, prettify headers -----
@@ -2928,221 +2825,10 @@ _PRETTY_PREVIEW_LABELS = {
 }
 
 
-def prettify_preview_df(df, drop_cols=None):
-    """Hide internal columns and rename DB column names to human labels.
-
-    Used by the Payroll Data Preview tabs. Returns a *new* DataFrame; the
-    original is left untouched (so downstream CSV exports still get full data).
-    """
-    if df is None or df.empty:
-        return df
-    cols_to_drop = set(_HIDDEN_PREVIEW_COLS)
-    if drop_cols:
-        cols_to_drop.update(drop_cols)
-    keep = [c for c in df.columns if c not in cols_to_drop]
-    out = df[keep].copy()
-    out.rename(columns=_PRETTY_PREVIEW_LABELS, inplace=True)
-    return out
 
 
-def cleanup_employee_master_ids():
-    """One-time cleanup: normalize Employee IDs and deduplicate records.
-
-    Strategy:
-    1. Load all employee_master rows.
-    2. Compute normalized employee_id for each row.
-    3. Group by normalized ID; keep the row with the *latest* uploaded_at
-       (fallback: highest id) and discard the others.
-    4. Rewrite the table with normalized IDs.
-
-    Returns a dict with counts: {normalized, removed, total_before, total_after}
-    """
-    init_payroll_database()
-    conn = get_db_connection()
-    cur = conn.cursor()
-    try:
-        cur.execute("SELECT id, employee_id, uploaded_at FROM employee_master")
-        rows = cur.fetchall()
-    except Exception as exc:
-        conn.close()
-        return {"error": str(exc)}
-
-    total_before = len(rows)
-    # group by normalized id
-    groups = {}
-    for row_id, emp_id, uploaded_at in rows:
-        norm = normalize_employee_id(emp_id)
-        if not norm:
-            # blank/invalid → mark for deletion
-            groups.setdefault("__blank__", []).append((row_id, emp_id, uploaded_at))
-            continue
-        groups.setdefault(norm, []).append((row_id, emp_id, uploaded_at))
-
-    keep_ids, delete_ids, normalize_ops = [], [], []
-    for norm, entries in groups.items():
-        if norm == "__blank__":
-            delete_ids.extend(e[0] for e in entries)
-            continue
-        # pick the most recent
-        entries_sorted = sorted(entries, key=lambda e: (e[2] or "", e[0]), reverse=True)
-        winner = entries_sorted[0]
-        losers = entries_sorted[1:]
-        keep_ids.append(winner[0])
-        delete_ids.extend(e[0] for e in losers)
-        # if the winner's raw emp_id != normalized, queue an UPDATE
-        if winner[1] != norm:
-            normalize_ops.append((norm, winner[0]))
-
-    # apply deletes
-    for row_id in delete_ids:
-        try:
-            cur.execute("DELETE FROM employee_master WHERE id = ?", (row_id,))
-        except Exception:
-            pass
-
-    # apply normalizations (skip duplicates that would violate UNIQUE)
-    for norm, row_id in normalize_ops:
-        try:
-            cur.execute("UPDATE employee_master SET employee_id = ? WHERE id = ?", (norm, row_id))
-        except Exception:
-            # another row may already own the normalized ID — drop this one
-            cur.execute("DELETE FROM employee_master WHERE id = ?", (row_id,))
-            delete_ids.append(row_id)
-
-    conn.commit()
-    cur.execute("SELECT COUNT(*) FROM employee_master")
-    total_after = cur.fetchone()[0]
-    conn.close()
-
-    return {
-        "total_before": total_before,
-        "total_after": total_after,
-        "removed": total_before - total_after,
-        "normalized": len(normalize_ops),
-    }
 
 
-def render_payroll_data_preview():
-    st.markdown("### 📊 Payroll Data Preview")
-    st.caption("Internal columns (`id`, timestamps) are hidden for readability. Use the cleanup button below to fix duplicate / float Employee IDs.")
-
-    init_payroll_database()  # ensure tables exist (no-op if already created)
-    conn = get_db_connection()
-
-    tab1, tab2, tab_pli, tab3, tab4 = st.tabs([
-        "Employee Master", "Salary Monthly", "PLI / Incentive", "TDS Monthly", "Tax Computation"
-    ])
-
-    with tab1:
-        df = pd.read_sql_query("SELECT * FROM employee_master ORDER BY employee_id", conn)
-        st.dataframe(prettify_preview_df(df), use_container_width=True, hide_index=True)
-        if not df.empty:
-            st.caption(f"{len(df)} record(s)")
-
-        # Cleanup tool
-        with st.expander("🧹 Clean Up Employee Master (normalize IDs & remove duplicates)"):
-            st.caption(
-                "Strips trailing `.0` (e.g. `1086.0` → `1086`), removes leading zeros, "
-                "and merges duplicates (keeps the most recently uploaded copy)."
-            )
-            if st.button("Run Cleanup Now", key="emp_master_cleanup_btn"):
-                result = cleanup_employee_master_ids()
-                if "error" in result:
-                    st.error(f"Cleanup failed: {result['error']}")
-                else:
-                    st.success(
-                        f"✅ Cleanup complete. Before: {result['total_before']} rows · "
-                        f"After: {result['total_after']} rows · "
-                        f"Removed: {result['removed']} · Normalized: {result['normalized']}"
-                    )
-                    st.rerun()
-
-    with tab2:
-        df = pd.read_sql_query(
-            "SELECT * FROM employee_salary_monthly ORDER BY uploaded_at DESC, employee_id",
-            conn,
-        )
-        if df.empty:
-            st.info("No salary records uploaded yet.")
-        else:
-            years = sorted(df.get("financial_year", pd.Series(dtype=str)).dropna().astype(str).unique().tolist())
-            fc1, fc2 = st.columns(2)
-            with fc1:
-                year_filter = st.selectbox(
-                    "Tax Year", ["All"] + years, index=0, key="prev_salary_year"
-                )
-            with fc2:
-                month_filter = st.selectbox(
-                    "Month", ["All"] + FY_MONTHS, index=0, key="prev_salary_month"
-                )
-            filtered = _apply_month_year_filter(df, year_filter, month_filter)
-            st.dataframe(prettify_preview_df(filtered), use_container_width=True, hide_index=True)
-            st.caption(f"{len(filtered)} record(s) of {len(df)} total")
-
-    with tab_pli:
-        try:
-            df_pli = pd.read_sql_query(
-                "SELECT * FROM employee_pli_monthly ORDER BY uploaded_at DESC, employee_id",
-                conn,
-            )
-        except Exception:
-            init_payroll_database()
-            df_pli = pd.read_sql_query(
-                "SELECT * FROM employee_pli_monthly ORDER BY uploaded_at DESC, employee_id",
-                conn,
-            )
-        if df_pli.empty:
-            st.info("No PLI / Incentive records uploaded yet.")
-        else:
-            years = sorted(
-                df_pli.get("financial_year", pd.Series(dtype=str))
-                .dropna().astype(str).unique().tolist()
-            )
-            fc1, fc2 = st.columns(2)
-            with fc1:
-                year_filter = st.selectbox(
-                    "Tax Year", ["All"] + years, index=0, key="prev_pli_year"
-                )
-            with fc2:
-                month_filter = st.selectbox(
-                    "Month", ["All"] + FY_MONTHS, index=0, key="prev_pli_month"
-                )
-            filtered = _apply_month_year_filter(df_pli, year_filter, month_filter)
-            st.dataframe(prettify_preview_df(filtered), use_container_width=True, hide_index=True)
-            st.caption(f"{len(filtered)} record(s) of {len(df_pli)} total")
-
-    with tab3:
-        df = pd.read_sql_query(
-            "SELECT * FROM employee_tds_monthly ORDER BY uploaded_at DESC, employee_id",
-            conn,
-        )
-        if df.empty:
-            st.info("No TDS records uploaded yet.")
-        else:
-            years = sorted(df.get("financial_year", pd.Series(dtype=str)).dropna().astype(str).unique().tolist())
-            fc1, fc2 = st.columns(2)
-            with fc1:
-                year_filter = st.selectbox(
-                    "Tax Year", ["All"] + years, index=0, key="prev_tds_year"
-                )
-            with fc2:
-                month_filter = st.selectbox(
-                    "Month", ["All"] + FY_MONTHS, index=0, key="prev_tds_month"
-                )
-            filtered = _apply_month_year_filter(df, year_filter, month_filter)
-            st.dataframe(prettify_preview_df(filtered), use_container_width=True, hide_index=True)
-            st.caption(f"{len(filtered)} record(s) of {len(df)} total")
-
-    with tab4:
-        df = pd.read_sql_query(
-            "SELECT * FROM employee_tax_computation ORDER BY computed_at DESC, employee_id",
-            conn,
-        )
-        st.dataframe(prettify_preview_df(df), use_container_width=True, hide_index=True)
-        if not df.empty:
-            st.caption(f"{len(df)} record(s)")
-
-    conn.close()
 
 
 # =====================================================
@@ -3175,1605 +2861,48 @@ STD_DEDUCTION_OLD = 50000
 CESS_RATE = 0.04
 
 
-def compute_slab_tax(taxable_income: float, regime: str) -> float:
-    """Compute tax using progressive slabs. Returns base tax before cess."""
-    if taxable_income <= 0:
-        return 0.0
-    slabs = NEW_REGIME_SLABS if str(regime).strip().lower() == "new" else OLD_REGIME_SLABS
-    tax = 0.0
-    prev_threshold = 0.0
-    for upper, rate in slabs:
-        if taxable_income > upper:
-            tax += (upper - prev_threshold) * rate
-            prev_threshold = upper
-        else:
-            tax += (taxable_income - prev_threshold) * rate
-            return tax
-    return tax
-
-
-def _safe_age_years(dob_str: str) -> int:
-    """Compute age in completed years from a DOB string. Returns 0 if invalid."""
-    if not dob_str:
-        return 0
-    try:
-        dob = pd.to_datetime(str(dob_str), errors="coerce")
-        if pd.isna(dob):
-            return 0
-        today = datetime.now()
-        age = today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
-        return max(0, int(age))
-    except Exception:
-        return 0
-
-
-def compute_employee_tax(employee_id: str, tax_year: str = "2026-27", regime_override: str | None = None) -> dict:
-    """Compute the full 39-field tax picture for one employee.
-
-    Returns a dict mapping every field name from the tax_cal.csv spec to its
-    computed value. Empty fields default to 0 or ""."""
-    init_payroll_database()
-    ensure_declaration_columns()
-    conn = get_db_connection()
-
-    # --- 1. Employee Master ---
-    emp_master = pd.read_sql_query(
-        "SELECT * FROM employee_master WHERE employee_id = ?",
-        conn, params=(str(employee_id),),
-    )
-    if emp_master.empty:
-        try:
-            emp_master = pd.read_sql_query(
-                "SELECT * FROM employee_master_payroll WHERE employee_id = ?",
-                conn, params=(str(employee_id),),
-            )
-        except Exception:
-            pass
-    em = emp_master.iloc[0].to_dict() if not emp_master.empty else {}
-
-    # --- 2. Salary Monthly (annualised: sum across all months of the tax year) ---
-    salary_rows = pd.read_sql_query(
-        "SELECT * FROM employee_salary_monthly WHERE employee_id = ? AND financial_year = ?",
-        conn, params=(str(employee_id), str(tax_year)),
-    )
-
-    def annual(col):
-        return float(pd.to_numeric(salary_rows.get(col, pd.Series(dtype=float)), errors="coerce").fillna(0).sum()) if not salary_rows.empty else 0.0
-
-    basic = annual("basic")
-    hra = annual("hra")
-    sodexo = annual("sodexo_meal_passes")
-    telephone = annual("telephone_internet")
-    electricity = annual("electricity_reimbursement")
-    professional = annual("professional_software")
-    skill = annual("skill_development")
-    utility = annual("power_utility_allowance")
-    taxable_allowance = annual("taxable_allowance")
-    other_adjustment = annual("other_adjustment")
-    exgratia = annual("exgratia")
-    gratuity = annual("gratuity")
-    severance = annual("severance")
-    leave_enc = annual("leave_encashment")
-    referral = annual("referral_bonus")
-
-    # --- 3. PLI / Variable Pay ---
-    try:
-        pli_rows = pd.read_sql_query(
-            "SELECT * FROM employee_pli_monthly WHERE employee_id = ? AND financial_year = ?",
-            conn, params=(str(employee_id), str(tax_year)),
-        )
-        ot_pli = float(pd.to_numeric(pli_rows.get("total_variable_pay", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()) if not pli_rows.empty else 0.0
-    except Exception:
-        ot_pli = 0.0
-
-    # --- 4. TDS already deducted ---
-    tds_rows = pd.read_sql_query(
-        "SELECT * FROM employee_tds_monthly WHERE employee_id = ? AND financial_year = ?",
-        conn, params=(str(employee_id), str(tax_year)),
-    )
-    tds_already_deducted = float(pd.to_numeric(tds_rows.get("tds_deducted", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()) if not tds_rows.empty else 0.0
-
-    # --- 5. Approved declarations ---
-    decl_rows = pd.read_sql_query(
-        "SELECT * FROM employee_investments WHERE employee_id = ? AND financial_year = ? AND status = 'Approved'",
-        conn, params=(str(employee_id), str(tax_year)),
-    )
-    conn.close()
-
-    def approved_for(section_keywords):
-        if decl_rows.empty:
-            return 0.0
-        mask = decl_rows["section"].astype(str).str.lower().apply(
-            lambda s: any(k in s for k in section_keywords)
-        )
-        return float(pd.to_numeric(decl_rows.loc[mask, "approved_amount"], errors="coerce").fillna(0).sum())
-
-    # --- 6. Resolve regime ---
-    if regime_override:
-        regime = regime_override
-    else:
-        regime_from_decl = decl_rows["tax_regime"].iloc[0] if not decl_rows.empty and "tax_regime" in decl_rows.columns and decl_rows["tax_regime"].iloc[0] else ""
-        regime_from_master = em.get("tax_regime", "")
-        regime = (regime_from_decl or regime_from_master or "New").strip()
-    is_new_regime = str(regime).strip().lower() == "new"
-
-    # --- 7. Compute the buckets ---
-    # Previous employer income (Form 12B)
-    prev_emp_income = 0.0
-    if not decl_rows.empty and "previous_employer_income" in decl_rows.columns:
-        prev_emp_income = float(pd.to_numeric(decl_rows["previous_employer_income"], errors="coerce").fillna(0).sum())
-
-    # Total Income from Salary = all income components + previous employer income
-    total_income_from_salary = (
-        basic + hra + sodexo + telephone + electricity + professional + skill +
-        utility + taxable_allowance + ot_pli + exgratia + gratuity + severance +
-        leave_enc + referral + other_adjustment + prev_emp_income
-    )
-
-    # Approved allowances / reimbursements (proof-based exemptions, only Old regime)
-    if is_new_regime:
-        approved_allowances = approved_for(["meal passes", "sodexo"])
-        approved_investments = 0.0  # No Chapter VI-A under New regime
-        home_loan_deduction = 0.0
-        other_eligible = approved_for(["80ccd(2)", "employer nps"])
-        meal_passes_decl = approved_for(["meal passes", "sodexo"])
-    else:
-        approved_allowances = approved_for([
-            "meal passes", "sodexo", "telephone", "electricity",
-            "professional", "skill", "power", "utility", "hra",
-        ])
-        approved_investments = approved_for(["80c", "80d", "80ccd", "nps", "donation", "80g"])
-        home_loan_deduction = approved_for(["home loan"])
-        other_eligible = approved_for(["other deduction", "80e", "80tta"])
-        meal_passes_decl = approved_for(["meal passes", "sodexo"])
-
-    std_deduction = STD_DEDUCTION_NEW if is_new_regime else STD_DEDUCTION_OLD
-
-    # --- 8. Taxable salary ---
-    taxable_salary = max(
-        0,
-        total_income_from_salary
-        - approved_allowances
-        - std_deduction
-        - approved_investments
-        - home_loan_deduction
-        - other_eligible,
-    )
-
-    # --- 9. Tax computation ---
-    tax1_total_tax = compute_slab_tax(taxable_salary, regime)
-    tax2_cess = tax1_total_tax * CESS_RATE
-    tax3_total_after_cess = tax1_total_tax + tax2_cess
-    tax4_total_deduction = tds_already_deducted
-    tax5_net_deductible = max(0, tax3_total_after_cess - tax4_total_deduction)
-
-    return {
-        # Identity
-        "Employee ID": str(employee_id),
-        "Employee Name": em.get("employee_name", "") or (salary_rows.iloc[0]["employee_name"] if not salary_rows.empty else ""),
-        "Tax Regime": regime,
-        "PAN No.": em.get("pan_no", ""),
-        "Gender": em.get("gender", ""),
-        "Date of Joining": em.get("doj", em.get("date_of_joining", "")),
-        "Date of Exit": em.get("doe", em.get("date_of_exit", "")),
-        "DOB": em.get("dob", ""),
-        "Age": _safe_age_years(em.get("dob", "")),
-        "Designation": em.get("designation", ""),
-        # Income components
-        "Basic Salary": basic,
-        "HRA": hra,
-        "Sodexo / Meal Passes": sodexo,
-        "Telephone / Internet": telephone,
-        "Electricity Reimbursement": electricity,
-        "Professional / Software": professional,
-        "Skill Development": skill,
-        "Power & Utility Allowance": utility,
-        "Taxable Allowance": taxable_allowance,
-        "OT / PLI / Profit Sharing": ot_pli,
-        "EXGRATIA": exgratia,
-        "Gratuity": gratuity,
-        "Severance": severance,
-        "Leave Encashment": leave_enc,
-        "Referral Bonus": referral,
-        "Other Adjustment": other_adjustment,
-        "Previous Employer Income 12B/12BB": prev_emp_income,
-        "Total Income from Salary": total_income_from_salary,
-        # Deductions
-        "Approved Allowances / Reimbursements": approved_allowances,
-        "Standard Deduction": std_deduction,
-        "Meal Passes / Sodexo Declaration": meal_passes_decl,
-        "Approved Investments": approved_investments,
-        "Home Loan Deduction": home_loan_deduction,
-        "Other Eligible Deductions": other_eligible,
-        # Tax output
-        "Taxable Salary": taxable_salary,
-        "Tax1 (Total Tax)": tax1_total_tax,
-        "Tax2 (Cess 4%)": tax2_cess,
-        "Tax3 (Total Tax after Cess)": tax3_total_after_cess,
-        "Tax4 (Total Deduction / TDS already paid)": tax4_total_deduction,
-        "Tax5 (Net Deductible)": tax5_net_deductible,
-    }
-
-
-def render_tax_computation_engine_panel():
-    """Admin panel: compute tax for any employee and view the 39-field breakdown."""
-    st.markdown("### 🧮 Tax Computation Engine")
-    st.caption("Pulls salary, PLI, TDS, and approved declarations to compute the full tax picture per Income Tax Act 2025.")
-
-    init_payroll_database()
-    ensure_declaration_columns()
-    conn = get_db_connection()
-    # Find any employee that has salary data uploaded
-    try:
-        emp_options_df = pd.read_sql_query(
-            "SELECT DISTINCT employee_id, employee_name FROM employee_salary_monthly ORDER BY employee_id",
-            conn,
-        )
-    except Exception:
-        emp_options_df = pd.DataFrame()
-    conn.close()
-
-    if emp_options_df.empty:
-        st.warning("No salary records uploaded yet. Upload a Salary Computation sheet first.")
-        return
-
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        emp_choice = st.selectbox(
-            "Employee",
-            emp_options_df.apply(lambda r: f"{r['employee_id']} — {r['employee_name']}", axis=1).tolist(),
-            key="tax_engine_emp",
-        )
-        employee_id = emp_choice.split(" — ")[0] if emp_choice else ""
-    with c2:
-        tax_year = st.text_input("Tax Year", value="2026-27", key="tax_engine_year")
-    with c3:
-        regime_choice = st.selectbox(
-            "Tax Regime",
-            ["Auto-detect", "New", "Old"],
-            help="Auto-detect uses the regime from the employee's most recent declaration or master record.",
-            key="tax_engine_regime",
-        )
-
-    regime_override = None if regime_choice == "Auto-detect" else regime_choice
-
-    if not employee_id:
-        return
-
-    try:
-        result = compute_employee_tax(employee_id, tax_year, regime_override)
-    except Exception as e:
-        st.error(f"Could not compute tax: {e}")
-        return
-
-    # ---- Identity card ----
-    st.markdown("#### 👤 Employee Information")
-    info_cols = st.columns(4)
-    info_cols[0].metric("Employee", f"{result['Employee ID']}", help=result["Employee Name"])
-    info_cols[1].metric("PAN", result["PAN No."] or "—")
-    info_cols[2].metric("Regime", result["Tax Regime"])
-    info_cols[3].metric("Age", f"{result['Age']} years" if result['Age'] else "—")
-
-    # ---- Income breakup ----
-    st.markdown("#### 💰 Income Breakup (Annualised)")
-    income_keys = [
-        "Basic Salary", "HRA", "Sodexo / Meal Passes", "Telephone / Internet",
-        "Electricity Reimbursement", "Professional / Software", "Skill Development",
-        "Power & Utility Allowance", "Taxable Allowance", "OT / PLI / Profit Sharing",
-        "EXGRATIA", "Gratuity", "Severance", "Leave Encashment", "Referral Bonus",
-        "Other Adjustment", "Previous Employer Income 12B/12BB",
-    ]
-    income_df = pd.DataFrame(
-        [(k, f"₹{result[k]:,.0f}") for k in income_keys if result[k]],
-        columns=["Component", "Annual Amount"],
-    )
-    if income_df.empty:
-        st.info("All income components are zero. Verify salary uploads.")
-    else:
-        st.dataframe(income_df, use_container_width=True, hide_index=True)
-    st.metric("💵 Total Income from Salary", f"₹{result['Total Income from Salary']:,.0f}")
-
-    # ---- Deductions ----
-    st.markdown("#### ➖ Deductions Applied")
-    ded_keys = [
-        "Approved Allowances / Reimbursements", "Standard Deduction",
-        "Meal Passes / Sodexo Declaration", "Approved Investments",
-        "Home Loan Deduction", "Other Eligible Deductions",
-    ]
-    ded_df = pd.DataFrame(
-        [(k, f"₹{result[k]:,.0f}") for k in ded_keys],
-        columns=["Deduction", "Amount"],
-    )
-    st.dataframe(ded_df, use_container_width=True, hide_index=True)
-    total_deductions = sum(result[k] for k in ded_keys)
-    st.metric("🔻 Total Deductions", f"₹{total_deductions:,.0f}")
-
-    # ---- Tax computation ----
-    st.markdown("#### 🧮 Tax Computation")
-    t1, t2 = st.columns(2)
-    t1.metric("Taxable Salary", f"₹{result['Taxable Salary']:,.0f}")
-    t2.metric("Tax1 (Slab Tax)", f"₹{result['Tax1 (Total Tax)']:,.0f}")
-    t3, t4 = st.columns(2)
-    t3.metric("Tax2 (4% Cess)", f"₹{result['Tax2 (Cess 4%)']:,.0f}")
-    t4.metric("Tax3 (Total + Cess)", f"₹{result['Tax3 (Total Tax after Cess)']:,.0f}")
-    t5, t6 = st.columns(2)
-    t5.metric("Tax4 (TDS Already Paid)", f"₹{result['Tax4 (Total Deduction / TDS already paid)']:,.0f}")
-    net = result["Tax5 (Net Deductible)"]
-    t6.metric(
-        "Tax5 (Net Payable)",
-        f"₹{net:,.0f}",
-        delta="⚠️ Additional tax due" if net > 0 else "✅ Fully covered",
-        delta_color="inverse" if net > 0 else "normal",
-    )
-
-    # ---- Slab visualisation ----
-    with st.expander(f"📊 {result['Tax Regime']} Regime Slabs (for reference)", expanded=False):
-        if result["Tax Regime"].lower() == "new":
-            slabs = pd.DataFrame([
-                {"Slab": "Up to ₹4,00,000", "Rate": "Nil"},
-                {"Slab": "₹4,00,001 – ₹8,00,000", "Rate": "5%"},
-                {"Slab": "₹8,00,001 – ₹12,00,000", "Rate": "10%"},
-                {"Slab": "₹12,00,001 – ₹16,00,000", "Rate": "15%"},
-                {"Slab": "₹16,00,001 – ₹20,00,000", "Rate": "20%"},
-                {"Slab": "₹20,00,001 – ₹24,00,000", "Rate": "25%"},
-                {"Slab": "Above ₹24,00,000", "Rate": "30%"},
-            ])
-            st.caption(f"Standard Deduction: ₹{STD_DEDUCTION_NEW:,}")
-        else:
-            slabs = pd.DataFrame([
-                {"Slab": "Up to ₹2,50,000", "Rate": "Nil"},
-                {"Slab": "₹2,50,001 – ₹5,00,000", "Rate": "5%"},
-                {"Slab": "₹5,00,001 – ₹10,00,000", "Rate": "20%"},
-                {"Slab": "Above ₹10,00,000", "Rate": "30%"},
-            ])
-            st.caption(f"Standard Deduction: ₹{STD_DEDUCTION_OLD:,}")
-        st.dataframe(slabs, use_container_width=True, hide_index=True)
-        st.caption("Plus 4% Health & Education Cess on the computed tax.")
-
-    # ---- Export ----
-    st.markdown("#### 📄 Export Full 39-Field Tax Statement")
-    full_df = pd.DataFrame(list(result.items()), columns=["Field", "Value"])
-    st.dataframe(full_df, use_container_width=True, hide_index=True, height=400)
-    csv_bytes = full_df.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        "⬇️ Download as CSV",
-        csv_bytes,
-        file_name=f"tax_computation_{employee_id}_{tax_year}.csv",
-        mime="text/csv",
-        use_container_width=True,
-    )
-
-
-def render_tax_output_fields():
-    st.markdown("### 🧾 Income Breakup + Tax Output Fields")
-
-    fields = pd.DataFrame([
-        {"Field": "Employee ID", "Meaning": "Unique employee mapping"},
-        {"Field": "Employee Name", "Meaning": "Employee identification"},
-        {"Field": "Tax Regime", "Meaning": "Old/New tax regime"},
-        {"Field": "PAN No.", "Meaning": "Tax compliance"},
-        {"Field": "Gender", "Meaning": "Reporting/reference"},
-        {"Field": "Date of Joining", "Meaning": "Payroll period calculation"},
-        {"Field": "Date of Exit", "Meaning": "Final settlement logic"},
-        {"Field": "DOB", "Meaning": "Age-based tax logic"},
-        {"Field": "Designation", "Meaning": "Employee role/reference"},
-        {"Field": "Basic Salary", "Meaning": "Base salary component"},
-        {"Field": "HRA", "Meaning": "House Rent Allowance"},
-        {"Field": "Sodexo / Meal Passes", "Meaning": "Meal benefit component"},
-        {"Field": "Telephone / Internet", "Meaning": "Conditional exemption up to approved proof"},
-        {"Field": "Electricity Reimbursement", "Meaning": "Conditional exemption up to approved proof"},
-        {"Field": "Professional / Software", "Meaning": "Conditional exemption up to approved proof"},
-        {"Field": "Skill Development", "Meaning": "Conditional exemption up to approved proof"},
-        {"Field": "Power & Utility Allowance", "Meaning": "Conditional exemption up to approved proof"},
-        {"Field": "Taxable Allowance", "Meaning": "Remaining taxable component"},
-        {"Field": "OT / PLI / Profit Sharing", "Meaning": "Variable taxable income"},
-        {"Field": "EXGRATIA", "Meaning": "Additional taxable income"},
-        {"Field": "Gratuity", "Meaning": "Conditional tax treatment"},
-        {"Field": "Severance", "Meaning": "Exit settlement taxation"},
-        {"Field": "Leave Encashment", "Meaning": "Conditional exemption/taxability"},
-        {"Field": "Referral Bonus", "Meaning": "Taxable variable income"},
-        {"Field": "Other Adjustment", "Meaning": "Manual adjustment field"},
-        {"Field": "Previous Employer Income 12B/12BB", "Meaning": "Previous employer salary and TDS details"},
-        {"Field": "Total Income from Salary", "Meaning": "Annual salary income before deductions"},
-        {"Field": "Approved Allowances / Reimbursements", "Meaning": "Only approved proof-based exemptions"},
-        {"Field": "Standard Deduction", "Meaning": "As per applicable regime/rules"},
-        {"Field": "Meal Passes / Sodexo Declaration", "Meaning": "Editable deduction/declaration head; exemption subject to approved amount"},
-        {"Field": "Approved Investments", "Meaning": "Only approved employee declarations/proofs"},
-        {"Field": "Home Loan Deduction", "Meaning": "Approved home loan interest"},
-        {"Field": "Other Eligible Deductions", "Meaning": "Other approved deductions"},
-        {"Field": "Taxable Salary", "Meaning": "Salary after applicable deductions/exemptions"},
-        {"Field": "Tax1", "Meaning": "Total Tax"},
-        {"Field": "Tax2", "Meaning": "Tax after adding 4% cess"},
-        {"Field": "Tax3", "Meaning": "Total Tax after Cess"},
-        {"Field": "Tax4", "Meaning": "Total Deduction"},
-        {"Field": "Tax5", "Meaning": "Net Deductible"},
-    ])
-    st.dataframe(fields, use_container_width=True, hide_index=True)
-
-
-def render_payroll_tax_engine_panel():
-    st.markdown("## 💼 Payroll & Tax Engine Setup")
-    st.info("Admin module: salary structure, payroll upload engine, TDS upload and payroll data preview.")
-    # Defensive init in case the SQLite file was wiped between sessions (Streamlit
-    # Cloud's ephemeral filesystem). CREATE TABLE IF NOT EXISTS is a no-op when
-    # the tables already exist.
-    init_payroll_database()
-
-    tab1, tab2, tab3, tab_engine, tab4 = st.tabs([
-        "Salary Structure Master",
-        "Payroll Upload Engine",
-        "Payroll Data Preview",
-        "🧮 Tax Computation Engine",
-        "Income & Tax Fields",
-    ])
-
-    with tab1:
-        render_salary_structure_master_panel()
-
-    with tab2:
-        render_payroll_upload_engine()
-
-    with tab3:
-        render_payroll_data_preview()
-
-    with tab_engine:
-        render_tax_computation_engine_panel()
-
-    with tab4:
-        render_tax_output_fields()
-
-
-# Initialize payroll DB early
-init_payroll_database()
-
-
-
-# =====================================================
-# EMPLOYEE DECLARATION + APPROVAL FLOW
-# =====================================================
-
-def ensure_declaration_columns():
-    """Upgrade employee_investments safely if older DB exists."""
-    init_payroll_database()
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("PRAGMA table_info(employee_investments)")
-    existing = [row[1] for row in cur.fetchall()]
-    add_cols = {
-        "tax_regime": "TEXT DEFAULT ''",
-        "previous_employer_income": "REAL DEFAULT 0",
-        "previous_employer_tds": "REAL DEFAULT 0",
-        "eligible_limit": "REAL DEFAULT 0",
-        "excess_amount": "REAL DEFAULT 0",
-        # Structured Form 12BB landlord/lender details (JSON-encoded)
-        "form_12bb_details": "TEXT DEFAULT ''",
-        # Structured Form 12B previous-employer details (JSON-encoded)
-        "form_12b_details": "TEXT DEFAULT ''",
-    }
-    for col, definition in add_cols.items():
-        if col not in existing:
-            cur.execute(f"ALTER TABLE employee_investments ADD COLUMN {col} {definition}")
-    conn.commit()
-    conn.close()
-
-
-# Sections that remain valid under the NEW tax regime (post Apr 2020 / Sec 115BAC).
-# Under the new regime, most Chapter VI-A deductions and salary exemptions are
-# NOT allowed. The two practical exceptions retained for Koenig employees are:
-#   1. Meal Passes / Sodexo Declaration — perquisite, not a tax exemption (Rule 3(7)(iii))
-#   2. Employer NPS 80CCD(2) — employer's contribution to NPS still allowed under new regime
-# Plus Form 12B (previous employer) is always relevant when joining mid-year,
-# regardless of regime, because it ensures correct year-to-date TDS.
-NEW_REGIME_ALLOWED_SECTIONS = {
-    "Meal Passes / Sodexo Declaration",
-    "Employer NPS 80CCD(2)",
-    "Form 12B (Previous Employer)",
-}
-
-ALL_DECLARATION_SECTIONS = [
-    "80C", "80D", "NPS 80CCD(1B)", "Employer NPS 80CCD(2)",
-    "HRA", "Home Loan Interest", "Donation",
-    "Meal Passes / Sodexo Declaration",
-    "Telephone / Internet", "Electricity Reimbursement", "Professional / Software",
-    "Skill Development", "Power & Utility Allowance",
-    "Form 12BB", "Form 12B (Previous Employer)", "Other Deduction",
-]
-
-
-def get_declaration_sections(tax_regime: str = "Old"):
-    """Return the list of declaration sections valid for the given regime.
-
-    NEW regime → only the small list of allowed sections.
-    OLD regime → the full list of sections.
-    """
-    if str(tax_regime).strip().lower() == "new":
-        return [s for s in ALL_DECLARATION_SECTIONS if s in NEW_REGIME_ALLOWED_SECTIONS]
-    return list(ALL_DECLARATION_SECTIONS)
-
-
-def get_section_default_limit(section):
-    limits = {
-        "80C": 150000, "80D": 25000, "NPS 80CCD(1B)": 50000,
-        "Employer NPS 80CCD(2)": 0, "HRA": 0, "Home Loan Interest": 200000,
-        "Donation": 0, "Meal Passes / Sodexo Declaration": 105600,
-        "Telephone / Internet": 0, "Electricity Reimbursement": 0,
-        "Professional / Software": 0, "Skill Development": 0,
-        "Power & Utility Allowance": 0, "Form 12BB": 0,
-        "Form 12B (Previous Employer)": 0, "Other Deduction": 0,
-    }
-    try:
-        structure_df = load_salary_structure_master()
-        match = structure_df[structure_df["component_name"].astype(str).str.strip().str.lower() == section.strip().lower()]
-        if not match.empty:
-            value = float(match.iloc[0].get("max_limit", 0) or 0)
-            if value > 0:
-                return value
-    except Exception:
-        pass
-    return limits.get(section, 0)
-
-
-# ---- Proof upload security: allowlist + size limit ----
-ALLOWED_PROOF_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".xlsx", ".xls"}
-MAX_PROOF_SIZE_MB = 5
-MAX_PROOF_SIZE_BYTES = MAX_PROOF_SIZE_MB * 1024 * 1024
-
-
-def save_uploaded_proof(uploaded_file, employee_id, section):
-    """Persist an uploaded proof file with extension allowlist + size check.
-
-    Returns the absolute path on success, or an empty string if the upload
-    was rejected. The caller should surface the reason via st.error.
-    """
-    if uploaded_file is None:
-        return ""
-
-    ext = Path(uploaded_file.name).suffix.lower()
-    if ext not in ALLOWED_PROOF_EXTENSIONS:
-        st.error(
-            f"❌ File type {ext or '(unknown)'} is not allowed. "
-            f"Permitted: {', '.join(sorted(ALLOWED_PROOF_EXTENSIONS))}."
-        )
-        return ""
-
-    try:
-        size = uploaded_file.size
-    except Exception:
-        size = len(uploaded_file.getbuffer())
-    if size and size > MAX_PROOF_SIZE_BYTES:
-        st.error(
-            f"❌ File too large ({size/1024/1024:.1f} MB). "
-            f"Max allowed is {MAX_PROOF_SIZE_MB} MB."
-        )
-        return ""
-
-    safe_section = re.sub(r"[^A-Za-z0-9]+", "_", section).strip("_") or "section"
-    safe_emp = re.sub(r"[^A-Za-z0-9]+", "_", str(employee_id)).strip("_") or "emp"
-    file_name = (
-        f"{safe_emp}_{safe_section}_"
-        f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_"
-        f"{uuid.uuid4().hex[:8]}{ext}"
-    )
-    file_path = PROOF_FOLDER / file_name
-    try:
-        with open(file_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
-    except Exception as e:
-        st.error(f"❌ Could not save proof: {e}")
-        return ""
-    return str(file_path)
-
-
-def submit_employee_declaration(
-    employee_id, employee_name, tax_year, tax_regime,
-    declaration_type, section, investment_type,
-    claimed_amount, eligible_limit, proof_file_path, employee_remarks,
-    previous_employer_income=0, previous_employer_tds=0,
-    form_12bb_details=None, form_12b_details=None,
-):
-    """Insert a new declaration row.
-
-    form_12bb_details and form_12b_details are optional dicts that will be
-    JSON-encoded into dedicated columns so the structured form data is
-    preserved alongside the high-level claim."""
-    import json as _json
-    ensure_declaration_columns()
-    claimed_amount = float(claimed_amount or 0)
-    eligible_limit = float(eligible_limit or 0)
-    excess_amount = max(claimed_amount - eligible_limit, 0) if eligible_limit > 0 else 0
-    f12bb_json = _json.dumps(form_12bb_details) if form_12bb_details else ""
-    f12b_json = _json.dumps(form_12b_details) if form_12b_details else ""
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO employee_investments (
-            employee_id, employee_name, financial_year, tax_regime,
-            declaration_type, section, investment_type,
-            claimed_amount, approved_amount, eligible_limit, excess_amount,
-            status, proof_file, employee_remarks,
-            previous_employer_income, previous_employer_tds,
-            form_12bb_details, form_12b_details,
-            submitted_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        employee_id, employee_name, tax_year, tax_regime,
-        declaration_type, section, investment_type,
-        claimed_amount, 0, eligible_limit, excess_amount,
-        "Pending", proof_file_path, employee_remarks,
-        float(previous_employer_income or 0), float(previous_employer_tds or 0),
-        f12bb_json, f12b_json,
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    ))
-    conn.commit()
-    conn.close()
-
-
-def load_employee_declarations(employee_id=None):
-    ensure_declaration_columns()
-    conn = get_db_connection()
-    try:
-        if employee_id:
-            df = pd.read_sql_query(
-                "SELECT * FROM employee_investments WHERE employee_id = ? ORDER BY submitted_at DESC",
-                conn, params=(str(employee_id),),
-            )
-        else:
-            df = pd.read_sql_query(
-                "SELECT * FROM employee_investments ORDER BY submitted_at DESC",
-                conn,
-            )
-    except Exception:
-        # Table missing on fresh container — force a rebuild and retry once
-        conn.close()
-        init_payroll_database()
-        ensure_declaration_columns()
-        conn = get_db_connection()
-        if employee_id:
-            df = pd.read_sql_query(
-                "SELECT * FROM employee_investments WHERE employee_id = ? ORDER BY submitted_at DESC",
-                conn, params=(str(employee_id),),
-            )
-        else:
-            df = pd.read_sql_query(
-                "SELECT * FROM employee_investments ORDER BY submitted_at DESC",
-                conn,
-            )
-    conn.close()
-    return df.fillna("")
-
-
-def update_declaration_status(row_id, status, approved_amount, admin_remarks, approved_by):
-    ensure_declaration_columns()
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("""
-        UPDATE employee_investments
-        SET status = ?, approved_amount = ?, admin_remarks = ?, approved_by = ?, approved_at = ?
-        WHERE id = ?
-    """, (status, float(approved_amount or 0), admin_remarks, approved_by, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), int(row_id)))
-    conn.commit()
-    conn.close()
-    try:
-        write_audit_log(
-            f"DECLARATION_{status.upper()}",
-            target_id=str(row_id),
-            details=f"approved_amount={approved_amount}; by={approved_by}",
-        )
-    except Exception:
-        pass
-
-
-def delete_declaration(row_id):
-    ensure_declaration_columns()
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM employee_investments WHERE id = ?", (int(row_id),))
-    conn.commit()
-    conn.close()
-    try:
-        write_audit_log("DECLARATION_DELETED", target_id=str(row_id))
-    except Exception:
-        pass
-
-
-def render_employee_declaration_portal():
-    st.markdown("### 🧾 Employee Declaration Portal")
-    st.caption("Submit investment proofs, reimbursements, Meal Passes/Sodexo, and Form 12B / 12BB.")
-    employee_id = str(st.session_state.employee_id)
-    employee_name = str(st.session_state.employee_name or f"Employee {employee_id}")
-    c1, c2 = st.columns(2)
-    with c1:
-        tax_year = st.text_input("Tax Year", value="2026-27", key="emp_decl_tax_year")
-    with c2:
-        tax_regime = st.selectbox("Tax Regime", ["New", "Old"], key="emp_decl_tax_regime")
-    st.markdown("---")
-
-    declaration_type = st.selectbox(
-        "Declaration Type",
-        ["Investment", "Reimbursement", "Allowance", "Form 12BB", "Form 12B (Previous Employer)", "Other"],
-        key="emp_decl_type",
-    )
-
-    # Regime-aware section list: under New Regime, only a handful of declarations
-    # actually reduce tax. Show a clear notice so employees aren't confused.
-    sections_for_regime = get_declaration_sections(tax_regime)
-    if str(tax_regime).strip().lower() == "new":
-        st.info(
-            "ℹ️ **New Tax Regime selected.** Under Section 115BAC, most Chapter VI-A "
-            "deductions and salary exemptions (80C, 80D, HRA, Home Loan Interest, LTA, "
-            "Donations, Reimbursements, etc.) are **NOT applicable**. "
-            "Only these are still considered for tax computation: "
-            "**Meal Passes / Sodexo**, **Employer NPS 80CCD(2)**, and **Form 12B "
-            "(previous employer details)**."
-        )
-
-    # If the previously-selected section is no longer valid under the new regime,
-    # reset it so the selectbox doesn't crash.
-    if (
-        "emp_decl_section" in st.session_state
-        and st.session_state["emp_decl_section"] not in sections_for_regime
-    ):
-        del st.session_state["emp_decl_section"]
-
-    section = st.selectbox(
-        "Section / Component",
-        sections_for_regime,
-        key="emp_decl_section",
-    )
-    eligible_limit = get_section_default_limit(section)
-
-    # ============================================================
-    # FORM 12BB — single consolidated declaration form
-    # (per Rule 26C of Income Tax Rules)
-    # ============================================================
-    form_12bb_details = None
-    form_12b_details = None
-
-    is_12bb = (section == "Form 12BB") or (declaration_type == "Form 12BB")
-    is_12b = (section == "Form 12B (Previous Employer)") or (declaration_type == "Form 12B (Previous Employer)")
-
-    if is_12bb:
-        st.info(
-            "📝 **Form 12BB** — Statement showing particulars of claims by an employee "
-            "for deduction of tax u/s 192. Fill the applicable rows below; leave others as 0."
-        )
-        st.markdown("#### 1. House Rent Allowance (HRA)")
-        hra_c1, hra_c2 = st.columns(2)
-        with hra_c1:
-            hra_rent_paid = st.number_input("Rent Paid (Annual)", min_value=0.0, step=1000.0, key="f12bb_hra_rent")
-            hra_landlord_name = st.text_input("Landlord Name", key="f12bb_hra_ll_name")
-        with hra_c2:
-            hra_landlord_pan = st.text_input("Landlord PAN (mandatory if rent > ₹1,00,000)", key="f12bb_hra_ll_pan")
-            hra_landlord_address = st.text_area("Landlord Address", key="f12bb_hra_ll_addr", height=70)
-
-        st.markdown("#### 2. Leave Travel Concessions / Assistance (LTA)")
-        lta_amount = st.number_input("LTA Claimed", min_value=0.0, step=1000.0, key="f12bb_lta")
-
-        st.markdown("#### 3. Deduction of Interest on Home Loan")
-        hl_c1, hl_c2 = st.columns(2)
-        with hl_c1:
-            hl_interest = st.number_input("Interest Payable / Paid", min_value=0.0, step=1000.0, key="f12bb_hl_int")
-            hl_lender_name = st.text_input("Lender Name", key="f12bb_hl_lender_name")
-        with hl_c2:
-            hl_lender_pan = st.text_input("Lender PAN", key="f12bb_hl_lender_pan")
-            hl_lender_address = st.text_area("Lender Address", key="f12bb_hl_lender_addr", height=70)
-        hl_lender_type = st.selectbox(
-            "Lender Type",
-            ["Financial Institution", "Employer", "Other"],
-            key="f12bb_hl_lender_type",
-        )
-
-        st.markdown("#### 4. Deduction under Chapter VI-A")
-        cv1, cv2, cv3 = st.columns(3)
-        with cv1:
-            sec_80c = st.number_input("Section 80C", min_value=0.0, step=1000.0, key="f12bb_80c")
-            sec_80ccc = st.number_input("Section 80CCC", min_value=0.0, step=1000.0, key="f12bb_80ccc")
-            sec_80ccd = st.number_input("Section 80CCD", min_value=0.0, step=1000.0, key="f12bb_80ccd")
-        with cv2:
-            sec_80d = st.number_input("Section 80D (Medical)", min_value=0.0, step=1000.0, key="f12bb_80d")
-            sec_80e = st.number_input("Section 80E (Education Loan)", min_value=0.0, step=1000.0, key="f12bb_80e")
-            sec_80g = st.number_input("Section 80G (Donations)", min_value=0.0, step=1000.0, key="f12bb_80g")
-        with cv3:
-            sec_80tta = st.number_input("Section 80TTA / 80TTB", min_value=0.0, step=1000.0, key="f12bb_80tta")
-            sec_other_label = st.text_input("Other Section (label)", placeholder="e.g. 80EEA", key="f12bb_other_label")
-            sec_other_amount = st.number_input("Other Section Amount", min_value=0.0, step=1000.0, key="f12bb_other_amt")
-
-        f12bb_total = (
-            hra_rent_paid + lta_amount + hl_interest +
-            sec_80c + sec_80ccc + sec_80ccd +
-            sec_80d + sec_80e + sec_80g + sec_80tta + sec_other_amount
-        )
-        st.success(f"💰 **Total claimed across Form 12BB: ₹{f12bb_total:,.0f}**")
-
-        form_12bb_details = {
-            "hra": {
-                "rent_paid": hra_rent_paid,
-                "landlord_name": hra_landlord_name,
-                "landlord_pan": hra_landlord_pan,
-                "landlord_address": hra_landlord_address,
-            },
-            "lta": lta_amount,
-            "home_loan": {
-                "interest": hl_interest,
-                "lender_name": hl_lender_name,
-                "lender_pan": hl_lender_pan,
-                "lender_address": hl_lender_address,
-                "lender_type": hl_lender_type,
-            },
-            "chapter_via": {
-                "80C": sec_80c, "80CCC": sec_80ccc, "80CCD": sec_80ccd,
-                "80D": sec_80d, "80E": sec_80e, "80G": sec_80g,
-                "80TTA_80TTB": sec_80tta,
-                "other_label": sec_other_label, "other_amount": sec_other_amount,
-            },
-        }
-
-    # ============================================================
-    # FORM 12B — previous employer salary + TDS
-    # ============================================================
-    if is_12b:
-        st.info(
-            "📝 **Form 12B** — Required if you joined Koenig mid-financial-year. "
-            "Submit your previous employer's salary and TDS so payroll deducts correct tax."
-        )
-        pe_c1, pe_c2 = st.columns(2)
-        with pe_c1:
-            pe_employer_name = st.text_input("Previous Employer Name", key="f12b_emp_name")
-            pe_employer_tan = st.text_input("Employer TAN / PAN", key="f12b_emp_tan")
-            pe_employment_from = st.date_input("Employment From", key="f12b_from", value=None)
-        with pe_c2:
-            pe_employer_address = st.text_area("Previous Employer Address", key="f12b_emp_addr", height=70)
-            pe_employment_to = st.date_input("Employment To", key="f12b_to", value=None)
-
-        st.markdown("#### Income from Previous Employer")
-        pi_c1, pi_c2 = st.columns(2)
-        with pi_c1:
-            pe_gross_salary = st.number_input("Gross Salary", min_value=0.0, step=1000.0, key="f12b_gross")
-            pe_hra = st.number_input("HRA Received", min_value=0.0, step=1000.0, key="f12b_hra")
-            pe_lta = st.number_input("LTA Received", min_value=0.0, step=1000.0, key="f12b_lta")
-        with pi_c2:
-            pe_other_allowances = st.number_input("Other Allowances", min_value=0.0, step=1000.0, key="f12b_other_allow")
-            pe_perquisites = st.number_input("Perquisites / Profits in Lieu", min_value=0.0, step=1000.0, key="f12b_perks")
-            pe_pf = st.number_input("Provident Fund Contributed", min_value=0.0, step=1000.0, key="f12b_pf")
-
-        st.markdown("#### Tax Deducted at Source (TDS)")
-        pt_c1, pt_c2 = st.columns(2)
-        with pt_c1:
-            pe_tds = st.number_input("Total TDS Deducted", min_value=0.0, step=1000.0, key="f12b_tds")
-        with pt_c2:
-            pe_prof_tax = st.number_input("Professional Tax Deducted", min_value=0.0, step=1000.0, key="f12b_ptax")
-
-        st.markdown("#### Deductions Already Claimed at Previous Employer")
-        pd_c1, pd_c2 = st.columns(2)
-        with pd_c1:
-            pe_80c = st.number_input("Section 80C", min_value=0.0, step=1000.0, key="f12b_80c")
-            pe_80d = st.number_input("Section 80D", min_value=0.0, step=1000.0, key="f12b_80d")
-        with pd_c2:
-            pe_other_chvia = st.number_input("Other Chapter VI-A", min_value=0.0, step=1000.0, key="f12b_other_chvia")
-            pe_std_ded = st.number_input("Standard Deduction Already Claimed", min_value=0.0, step=1000.0, key="f12b_std")
-
-        form_12b_details = {
-            "employer_name": pe_employer_name,
-            "employer_tan": pe_employer_tan,
-            "employer_address": pe_employer_address,
-            "employment_from": str(pe_employment_from) if pe_employment_from else "",
-            "employment_to": str(pe_employment_to) if pe_employment_to else "",
-            "gross_salary": pe_gross_salary,
-            "hra": pe_hra,
-            "lta": pe_lta,
-            "other_allowances": pe_other_allowances,
-            "perquisites": pe_perquisites,
-            "pf": pe_pf,
-            "tds": pe_tds,
-            "professional_tax": pe_prof_tax,
-            "deductions": {
-                "80C": pe_80c, "80D": pe_80d,
-                "other_chvia": pe_other_chvia,
-                "standard_deduction": pe_std_ded,
-            },
-        }
-
-    # ============================================================
-    # Common claim summary (also acts as the headline row)
-    # ============================================================
-    st.markdown("---")
-    st.markdown("#### Claim Summary")
-
-    # Investment / Claim Type:
-    # • For generic sections (80C, 80D, HRA, etc.) the section name IS the
-    #   claim type — no point asking again, so we just use it silently.
-    # • For free-form sections ("Other Deduction") and Form 12B/12BB where the
-    #   employee might want to be more specific, we DO show the input.
-    free_form_sections = {"Other Deduction", "Form 12BB", "Form 12B (Previous Employer)"}
-    if section in free_form_sections:
-        investment_type = st.text_input(
-            "Investment / Claim Type (e.g. 'LIC Premium', 'PPF Contribution', 'Tuition Fees')",
-            value="",
-            placeholder="Describe the specific instrument or expense",
-            key="emp_decl_inv_type",
-        ) or section
-    else:
-        investment_type = section
-
-    # Eligible Limit — sourced from Salary Structure Master / regulatory limits.
-    # Read-only display so employees don't accidentally inflate it.
-    eligible_limit = float(eligible_limit or 0)
-    edited_limit = eligible_limit  # variable kept for backward compatibility downstream
-    lim_c1, lim_c2 = st.columns([1, 2])
-    with lim_c1:
-        if eligible_limit > 0:
-            st.metric(
-                "Eligible Limit",
-                f"₹{eligible_limit:,.0f}",
-                help="Configured by HR / Finance in the Salary Structure Master. Read-only.",
-            )
-        else:
-            st.metric(
-                "Eligible Limit",
-                "As per actuals",
-                help="No fixed cap configured for this section. Amount approved based on submitted proofs.",
-            )
-    with lim_c2:
-        # For 12BB, auto-suggest sum from the form. For 12B, suggest gross_salary.
-        suggested_claim = 0.0
-        if is_12bb and form_12bb_details:
-            suggested_claim = float(
-                form_12bb_details["hra"]["rent_paid"]
-                + form_12bb_details["lta"]
-                + form_12bb_details["home_loan"]["interest"]
-                + sum(v for k, v in form_12bb_details["chapter_via"].items() if isinstance(v, (int, float)))
-            )
-        elif is_12b and form_12b_details:
-            suggested_claim = float(form_12b_details.get("gross_salary", 0))
-        claimed_amount = st.number_input(
-            "Claimed Amount (₹)",
-            min_value=0.0,
-            step=1000.0,
-            value=float(suggested_claim or 0),
-            key="emp_decl_claimed_amount",
-        )
-        if eligible_limit > 0 and claimed_amount > eligible_limit:
-            st.warning(f"⚠️ Claim exceeds eligible limit by ₹{claimed_amount - eligible_limit:,.0f}")
-        elif eligible_limit > 0 and claimed_amount > 0:
-            st.success(f"✅ Within configured limit (₹{claimed_amount:,.0f} of ₹{eligible_limit:,.0f})")
-
-    # Legacy fields kept for backward-compatibility with payroll computation
-    previous_employer_income = float(form_12b_details.get("gross_salary", 0)) if form_12b_details else 0.0
-    previous_employer_tds = float(form_12b_details.get("tds", 0)) if form_12b_details else 0.0
-
-    uploaded_file = st.file_uploader(
-        "Upload Proof / Document",
-        type=["pdf", "jpg", "jpeg", "png", "xlsx", "xls"],
-        key="emp_decl_proof",
-    )
-    employee_remarks = st.text_area(
-        "Employee Remarks",
-        placeholder="Mention bill period, previous employer name, etc.",
-        key="emp_decl_remarks",
-    )
-    if st.button("📤 Submit Declaration", use_container_width=True):
-        proof_path = save_uploaded_proof(uploaded_file, employee_id, section)
-        submit_employee_declaration(
-            employee_id, employee_name, tax_year, tax_regime,
-            declaration_type, section, investment_type,
-            claimed_amount, edited_limit, proof_path, employee_remarks,
-            previous_employer_income, previous_employer_tds,
-            form_12bb_details=form_12bb_details,
-            form_12b_details=form_12b_details,
-        )
-        st.success("Declaration submitted successfully for approval.")
-        st.rerun()
-
-    st.markdown("---")
-    st.markdown("### My Declaration Status")
-    my_df = load_employee_declarations(employee_id)
-    if my_df.empty:
-        st.info("No declarations submitted yet.")
-        return
-
-    show_cols = [
-        "financial_year", "tax_regime", "declaration_type", "section", "investment_type",
-        "claimed_amount", "eligible_limit", "excess_amount", "approved_amount",
-        "status", "employee_remarks", "admin_remarks", "submitted_at", "approved_at",
-    ]
-    show_cols = [c for c in show_cols if c in my_df.columns]
-    st.dataframe(my_df[show_cols], use_container_width=True, hide_index=True)
-
-    # ---- Fixed totals ----
-    # Approved: sum of approved_amount where status == Approved (fall back to
-    # claimed_amount if admin forgot to set approved_amount).
-    # Pending: claimed_amount where status == Pending.
-    # Rejected: claimed_amount where status == Rejected.
-    status_series = my_df.get("status", pd.Series([], dtype=str)).astype(str).str.strip()
-    approved_rows = my_df[status_series.str.lower() == "approved"].copy()
-    pending_rows = my_df[status_series.str.lower() == "pending"].copy()
-    rejected_rows = my_df[status_series.str.lower() == "rejected"].copy()
-
-    def _approved_value(row):
-        amt = float(pd.to_numeric(row.get("approved_amount", 0), errors="coerce") or 0)
-        if amt > 0:
-            return amt
-        # Admin approved but left the field blank — fall back to min(claimed, limit)
-        claimed = float(pd.to_numeric(row.get("claimed_amount", 0), errors="coerce") or 0)
-        limit = float(pd.to_numeric(row.get("eligible_limit", 0), errors="coerce") or 0)
-        return min(claimed, limit) if limit > 0 else claimed
-
-    approved_total = float(approved_rows.apply(_approved_value, axis=1).sum()) if not approved_rows.empty else 0.0
-    pending_total = float(pd.to_numeric(pending_rows.get("claimed_amount", pd.Series(dtype=float)), errors="coerce").fillna(0).sum())
-    rejected_total = float(pd.to_numeric(rejected_rows.get("claimed_amount", pd.Series(dtype=float)), errors="coerce").fillna(0).sum())
-
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Approved Amount", f"₹{approved_total:,.0f}", f"{len(approved_rows)} approved")
-    m2.metric("Pending Amount", f"₹{pending_total:,.0f}", f"{len(pending_rows)} pending")
-    m3.metric("Rejected Amount", f"₹{rejected_total:,.0f}", f"{len(rejected_rows)} rejected")
-
-
-
-def render_inline_proof_viewer(proof_path):
-    proof_path = str(proof_path or "").strip()
-
-    if not proof_path:
-        st.info("No proof uploaded for this declaration.")
-        return
-
-    path_obj = Path(proof_path)
-
-    if not path_obj.exists():
-        st.warning("Proof file not found on server.")
-        return
-
-    suffix = path_obj.suffix.lower()
-
-    try:
-        if suffix in [".jpg", ".jpeg", ".png"]:
-            st.image(str(path_obj), caption=path_obj.name, use_container_width=True)
-
-        elif suffix == ".pdf":
-            with open(path_obj, "rb") as pdf_file:
-                PDFbyte = pdf_file.read()
-            st.download_button(
-                label="📄 Open / Download PDF Proof",
-                data=PDFbyte,
-                file_name=path_obj.name,
-                mime="application/pdf",
-                use_container_width=True
-            )
-            st.info("Chrome blocks embedded PDF preview on Streamlit Cloud. Use the button above to open the proof.")
-
-        elif suffix in [".xlsx", ".xls"]:
-            preview_df = pd.read_excel(path_obj).fillna("")
-            st.dataframe(preview_df.head(50), use_container_width=True)
-            st.caption("Showing first 50 rows of uploaded Excel proof.")
-
-        else:
-            st.info("Preview not available for this file type.")
-
-        with open(path_obj, "rb") as f:
-            st.download_button(
-                "⬇️ Download Proof",
-                f.read(),
-                file_name=path_obj.name,
-                use_container_width=True
-            )
-
-    except Exception as e:
-        st.warning(f"Unable to preview proof: {e}")
-
-
-def render_admin_declaration_approval_panel():
-    st.markdown("### ✅ Investment / Declaration Approval Panel")
-    st.caption("Change status in the table, enter approved amount/remarks, then click Submit Updates.")
-
-    df = load_employee_declarations()
-
-    if df.empty:
-        st.info("No employee declarations submitted yet.")
-        return
-
-    c1, c2, c3 = st.columns(3)
-
-    with c1:
-        status_filter = st.selectbox(
-            "Filter Status",
-            ["All", "Pending", "Approved", "Rejected", "Edit", "Delete"],
-            key="admin_decl_status_filter"
-        )
-
-    with c2:
-        section_filter = st.selectbox(
-            "Filter Section",
-            ["All"] + sorted(df["section"].astype(str).dropna().unique().tolist()),
-            key="admin_decl_section_filter"
-        )
-
-    with c3:
-        employee_filter = st.text_input(
-            "Employee ID / Name",
-            key="admin_decl_employee_filter"
-        )
-
-    filtered = df.copy()
-
-    if status_filter != "All":
-        filtered = filtered[filtered["status"] == status_filter]
-
-    if section_filter != "All":
-        filtered = filtered[filtered["section"] == section_filter]
-
-    if employee_filter.strip():
-        q = employee_filter.strip().lower()
-        filtered = filtered[
-            filtered["employee_id"].astype(str).str.lower().str.contains(q, na=False) |
-            filtered["employee_name"].astype(str).str.lower().str.contains(q, na=False)
-        ]
-
-    if filtered.empty:
-        st.info("No matching declarations.")
-        return
-
-    st.markdown("### Pending Employee Declarations")
-
-    if filtered.empty:
-        st.info("No declarations submitted yet.")
-        return
-
-    st.markdown("#### Step 1: Update Status in Table")
-
-    editable_cols = [
-        "id", "employee_id", "employee_name", "financial_year", "tax_regime",
-        "declaration_type", "section", "investment_type",
-        "claimed_amount", "eligible_limit", "excess_amount",
-        "approved_amount", "status", "employee_remarks",
-        "admin_remarks", "submitted_at", "approved_at"
-    ]
-    editable_cols = [c for c in editable_cols if c in filtered.columns]
-
-    edit_df = filtered[editable_cols].copy()
-
-    original_status_map = dict(zip(edit_df["id"], edit_df["status"]))
-    original_approved_map = dict(zip(edit_df["id"], edit_df["approved_amount"]))
-    original_remarks_map = dict(zip(edit_df["id"], edit_df["admin_remarks"]))
-
-    edited_df = st.data_editor(
-        edit_df,
-        use_container_width=True,
-        hide_index=True,
-        num_rows="fixed",
-        key="admin_declaration_status_editor",
-        disabled=[
-            col for col in editable_cols
-            if col not in ["status", "approved_amount", "admin_remarks"]
-        ],
-        column_config={
-            "id": st.column_config.NumberColumn("ID", disabled=True),
-            "employee_id": st.column_config.TextColumn("Employee ID", disabled=True),
-            "employee_name": st.column_config.TextColumn("Employee Name", disabled=True),
-            "financial_year": st.column_config.TextColumn("Tax Year", disabled=True),
-            "tax_regime": st.column_config.TextColumn("Tax Regime", disabled=True),
-            "declaration_type": st.column_config.TextColumn("Declaration Type", disabled=True),
-            "section": st.column_config.TextColumn("Section", disabled=True),
-            "investment_type": st.column_config.TextColumn("Investment Type", disabled=True),
-            "claimed_amount": st.column_config.NumberColumn("Claimed Amount", disabled=True),
-            "eligible_limit": st.column_config.NumberColumn("Eligible Limit", disabled=True),
-            "excess_amount": st.column_config.NumberColumn("Excess Amount", disabled=True),
-            "approved_amount": st.column_config.NumberColumn("Approved Amount", min_value=0.0, step=1000.0),
-            "status": st.column_config.SelectboxColumn(
-                "Status",
-                options=["Pending", "Approved", "Rejected", "Edit", "Delete"],
-                required=True,
-                help=(
-                    "Pending = awaiting review | Approved = accepted | "
-                    "Rejected = denied | Edit = reopen for re-submission (resets to Pending) | "
-                    "Delete = remove permanently"
-                ),
-            ),
-            "employee_remarks": st.column_config.TextColumn("Employee Remarks", disabled=True),
-            "admin_remarks": st.column_config.TextColumn("Admin Remarks"),
-            "submitted_at": st.column_config.TextColumn("Submitted At", disabled=True),
-            "approved_at": st.column_config.TextColumn("Approved At", disabled=True),
-        }
-    )
-
-    # ----- Live preview of unsaved changes -----
-    # Compute which rows have edits relative to the original snapshot so the admin
-    # can SEE what will be saved before clicking Submit Updates.
-    pending_changes = []
-    for _, _r in edited_df.iterrows():
-        _rid = int(_r["id"])
-        _new_status = str(_r.get("status", "Pending")).strip()
-        _new_approved = float(_r.get("approved_amount", 0) or 0)
-        _new_remarks = str(_r.get("admin_remarks", "") or "")
-        _old_status = str(original_status_map.get(_rid, "")).strip()
-        _old_approved = float(original_approved_map.get(_rid, 0) or 0)
-        _old_remarks = str(original_remarks_map.get(_rid, "") or "")
-        if (
-            _new_status.lower() != _old_status.lower()
-            or abs(_new_approved - _old_approved) > 0.001
-            or _new_remarks != _old_remarks
-        ):
-            pending_changes.append({
-                "ID": _rid,
-                "Employee": f"{_r.get('employee_id','')} - {_r.get('employee_name','')}",
-                "Section": _r.get("section", ""),
-                "Old Status": _old_status or "-",
-                "→": "→",
-                "New Status": _new_status,
-                "New Approved Amount": _new_approved,
-                "Admin Remarks": _new_remarks,
-            })
-
-    if pending_changes:
-        st.warning(
-            f"⚠️ **You have {len(pending_changes)} unsaved change(s).** "
-            "These are NOT saved until you click **Submit Updates** below. "
-            "Navigating away or refreshing without clicking the button will lose your edits."
-        )
-        with st.expander(f"📝 Preview unsaved changes ({len(pending_changes)})", expanded=True):
-            st.dataframe(pd.DataFrame(pending_changes), use_container_width=True, hide_index=True)
-    else:
-        st.info(
-            "💡 To approve a declaration: (1) change the **Status** dropdown in the table to "
-            "`Approved`, `Rejected`, `Edit`, or `Delete`. (2) Optionally enter an **Approved Amount** "
-            "or **Admin Remarks**. (3) Click **Submit Updates** below — changes are NOT "
-            "saved until you click the button."
-        )
-
-    submit_label = (
-        f"✅ Submit Updates ({len(pending_changes)} change{'s' if len(pending_changes) != 1 else ''})"
-        if pending_changes else "✅ Submit Updates"
-    )
-    if st.button(
-        submit_label,
-        use_container_width=True,
-        key="submit_declaration_approval_updates",
-        type="primary",
-        disabled=not pending_changes,
-    ):
-        updated_count = 0
-        deleted_count = 0
-        edited_count = 0
-        skipped_count = 0
-
-        # Build a lookup so we can read claimed_amount / eligible_limit from the original df
-        meta_map = {
-            int(r["id"]): {
-                "claimed": float(r.get("claimed_amount", 0) or 0),
-                "limit": float(r.get("eligible_limit", 0) or 0),
-            }
-            for _, r in filtered.iterrows()
-        }
-
-        # Valid status options (normalized)
-        VALID_STATUS = {
-            "pending": "Pending",
-            "approved": "Approved",
-            "rejected": "Rejected",
-            "edit": "Edit",
-            "delete": "Delete",
-        }
-
-        for _, row in edited_df.iterrows():
-            row_id = int(row["id"])
-            # Normalize status casing so "approved"/"APPROVED"/"Approved" all behave the same
-            raw_status = str(row.get("status", "Pending")).strip()
-            new_status = VALID_STATUS.get(raw_status.lower(), "Pending")
-            new_approved_amount = float(row.get("approved_amount", 0) or 0)
-            new_admin_remarks = str(row.get("admin_remarks", "") or "")
-
-            old_status = VALID_STATUS.get(str(original_status_map.get(row_id, "")).strip().lower(), "Pending")
-            old_approved = float(original_approved_map.get(row_id, 0) or 0)
-            old_remarks = str(original_remarks_map.get(row_id, "") or "")
-
-            changed = (
-                new_status != old_status
-                or abs(new_approved_amount - old_approved) > 0.001
-                or new_admin_remarks != old_remarks
-            )
-            if not changed:
-                skipped_count += 1
-                continue
-
-            if new_status == "Delete":
-                delete_declaration(row_id)
-                deleted_count += 1
-                continue
-
-            if new_status == "Rejected":
-                update_declaration_status(
-                    row_id, "Rejected", 0, new_admin_remarks,
-                    st.session_state.employee_name or "Admin",
-                )
-                updated_count += 1
-                continue
-
-            if new_status == "Approved":
-                # Auto-populate approved_amount if admin left it blank/zero.
-                # Use min(claimed, eligible_limit) when a limit is set, else claimed.
-                if new_approved_amount <= 0:
-                    meta = meta_map.get(row_id, {})
-                    claimed = meta.get("claimed", 0)
-                    limit = meta.get("limit", 0)
-                    new_approved_amount = min(claimed, limit) if limit > 0 else claimed
-                update_declaration_status(
-                    row_id, "Approved", new_approved_amount, new_admin_remarks,
-                    st.session_state.employee_name or "Admin",
-                )
-                updated_count += 1
-                continue
-
-            if new_status == "Edit":
-                # "Edit" reopens a previously-decided declaration so the admin can
-                # re-process it (e.g. they approved by mistake). We clear the
-                # approved_amount and admin_remarks (keeping any newly typed
-                # remarks) and reset status to Pending. The employee will see it
-                # as Pending again on their dashboard.
-                update_declaration_status(
-                    row_id, "Pending", 0,
-                    new_admin_remarks or "Re-opened for editing by admin",
-                    st.session_state.employee_name or "Admin",
-                )
-                edited_count += 1
-                continue
-
-            # Pending (default)
-            update_declaration_status(
-                row_id, "Pending", new_approved_amount, new_admin_remarks,
-                st.session_state.employee_name or "Admin",
-            )
-            updated_count += 1
-
-        st.success(
-            f"✅ Updates submitted — "
-            f"Updated: {updated_count}, Re-opened: {edited_count}, Deleted: {deleted_count}, Unchanged: {skipped_count}"
-        )
-        st.rerun()
-
-    st.markdown("---")
-    st.markdown("#### Step 2: View Uploaded Proof Inline")
-
-    proof_df = filtered[["id", "employee_id", "employee_name", "section", "proof_file"]].copy()
-    proof_df = proof_df[proof_df["proof_file"].astype(str).str.strip() != ""]
-
-    if proof_df.empty:
-        st.info("No proof files available for the current filter.")
-    else:
-        proof_id = st.selectbox(
-            "Select Declaration ID to View Proof",
-            proof_df["id"].astype(int).tolist(),
-            key="proof_preview_id"
-        )
-
-        selected_proof_row = proof_df[proof_df["id"] == proof_id].iloc[0]
-        st.caption(
-            f"Proof for Employee {selected_proof_row.get('employee_id', '')} - "
-            f"{selected_proof_row.get('employee_name', '')} | "
-            f"Section: {selected_proof_row.get('section', '')}"
-        )
-
-        render_inline_proof_viewer(selected_proof_row.get("proof_file", ""))
-
-    # ----- Step 3: Form 12B / 12BB structured viewer -----
-    import json as _json
-    form_rows = filtered.copy()
-    if "form_12bb_details" in form_rows.columns or "form_12b_details" in form_rows.columns:
-        f12bb = form_rows[form_rows.get("form_12bb_details", "").astype(str).str.strip() != ""] if "form_12bb_details" in form_rows.columns else pd.DataFrame()
-        f12b = form_rows[form_rows.get("form_12b_details", "").astype(str).str.strip() != ""] if "form_12b_details" in form_rows.columns else pd.DataFrame()
-
-        if not f12bb.empty or not f12b.empty:
-            st.markdown("---")
-            st.markdown("#### Step 3: Structured Form 12B / 12BB Data")
-
-            if not f12bb.empty:
-                with st.expander(f"📄 Form 12BB submissions ({len(f12bb)})", expanded=False):
-                    for _, r in f12bb.iterrows():
-                        try:
-                            details = _json.loads(r["form_12bb_details"])
-                        except Exception:
-                            continue
-                        st.markdown(
-                            f"**Employee {r['employee_id']} — {r['employee_name']}** | "
-                            f"Submitted: {r.get('submitted_at', '')}"
-                        )
-                        cv1, cv2 = st.columns(2)
-                        with cv1:
-                            st.markdown("**HRA**")
-                            st.json(details.get("hra", {}))
-                            st.markdown(f"**LTA:** ₹{details.get('lta', 0):,.0f}")
-                        with cv2:
-                            st.markdown("**Home Loan**")
-                            st.json(details.get("home_loan", {}))
-                        st.markdown("**Chapter VI-A**")
-                        st.json(details.get("chapter_via", {}))
-                        st.markdown("---")
-
-            if not f12b.empty:
-                with st.expander(f"📄 Form 12B (Previous Employer) submissions ({len(f12b)})", expanded=False):
-                    for _, r in f12b.iterrows():
-                        try:
-                            details = _json.loads(r["form_12b_details"])
-                        except Exception:
-                            continue
-                        st.markdown(
-                            f"**Employee {r['employee_id']} — {r['employee_name']}** | "
-                            f"Submitted: {r.get('submitted_at', '')}"
-                        )
-                        st.markdown(
-                            f"**Previous Employer:** {details.get('employer_name','')}  \n"
-                            f"**TAN/PAN:** {details.get('employer_tan','')}  \n"
-                            f"**Period:** {details.get('employment_from','')} → {details.get('employment_to','')}"
-                        )
-                        b1, b2 = st.columns(2)
-                        with b1:
-                            st.markdown("**Income**")
-                            st.write({
-                                "Gross Salary": details.get("gross_salary", 0),
-                                "HRA": details.get("hra", 0),
-                                "LTA": details.get("lta", 0),
-                                "Other Allowances": details.get("other_allowances", 0),
-                                "Perquisites": details.get("perquisites", 0),
-                                "PF": details.get("pf", 0),
-                            })
-                        with b2:
-                            st.markdown("**Tax & Deductions**")
-                            st.write({
-                                "TDS Deducted": details.get("tds", 0),
-                                "Professional Tax": details.get("professional_tax", 0),
-                                **{f"Ded: {k}": v for k, v in details.get("deductions", {}).items()},
-                            })
-                        st.markdown("---")
-
-    st.markdown("---")
-    csv = filtered.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        "⬇️ Download Approval Data CSV",
-        csv,
-        file_name="employee_declaration_approval_data.csv",
-        mime="text/csv",
-        use_container_width=True
-    )
-
-def render_employee_tax_summary_snapshot():
-    st.markdown("### 📊 My Tax Declaration Snapshot")
-    employee_id = str(st.session_state.employee_id)
-    df = load_employee_declarations(employee_id)
-    if df.empty:
-        st.info("No declaration data yet. Submit investment/reimbursement proofs to see your tax snapshot.")
-        return
-
-    # Let the employee toggle which regime view they want. Defaults to the regime
-    # used in their most recent declaration so the view feels natural.
-    default_regime = "Old"
-    try:
-        latest_regime = str(df.iloc[0].get("tax_regime", "")).strip()
-        if latest_regime.lower() in ["old", "new"]:
-            default_regime = latest_regime.title()
-    except Exception:
-        pass
-
-    regime_idx = 0 if default_regime == "New" else 1
-    selected_regime = st.radio(
-        "Tax Regime view",
-        ["New", "Old"],
-        index=regime_idx,
-        horizontal=True,
-        key="tax_snapshot_regime",
-        help="Switch to see what your tax-saving picture looks like under each regime.",
-    )
-
-    if selected_regime == "New":
-        st.info(
-            "ℹ️ Under the **New Tax Regime** (Sec 115BAC), only "
-            "**Meal Passes / Sodexo** and **Employer NPS 80CCD(2)** declarations "
-            "reduce taxable income. All other declarations are shown for record but "
-            "do **NOT** count towards tax savings."
-        )
-
-    approved_df = df[df["status"] == "Approved"].copy()
-    pending_df = df[df["status"] == "Pending"].copy()
-    rejected_df = df[df["status"] == "Rejected"].copy()
-
-    # ---- Counted vs ignored under the selected regime ----
-    if selected_regime == "New":
-        counted_mask = approved_df["section"].astype(str).isin(NEW_REGIME_ALLOWED_SECTIONS)
-        counted_df = approved_df[counted_mask].copy()
-        ignored_df = approved_df[~counted_mask].copy()
-    else:
-        counted_df = approved_df.copy()
-        ignored_df = approved_df.iloc[0:0].copy()  # empty
-
-    counted_amount = pd.to_numeric(counted_df.get("approved_amount", 0), errors="coerce").fillna(0).sum()
-    ignored_amount = pd.to_numeric(ignored_df.get("approved_amount", 0), errors="coerce").fillna(0).sum()
-    pending_amount = pd.to_numeric(pending_df.get("claimed_amount", 0), errors="coerce").fillna(0).sum()
-    rejected_amount = pd.to_numeric(rejected_df.get("claimed_amount", 0), errors="coerce").fillna(0).sum()
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric(
-        "✅ Counted for Tax",
-        f"₹{counted_amount:,.0f}",
-        help=f"Approved declarations that reduce taxable income under the {selected_regime} regime.",
-    )
-    c2.metric(
-        "⚠️ Approved but Not Counted",
-        f"₹{ignored_amount:,.0f}",
-        help="Approved but ignored because the New Regime disallows this deduction." if selected_regime == "New" else "\u2014",
-    )
-    c3.metric("Pending Review", f"₹{pending_amount:,.0f}")
-    c4.metric("Rejected Claims", f"₹{rejected_amount:,.0f}")
-
-    if not counted_df.empty:
-        st.markdown("#### ✅ Tax-Counted Approved Amount by Section")
-        section_summary = (
-            counted_df.groupby("section", as_index=False)["approved_amount"]
-            .sum()
-            .sort_values("approved_amount", ascending=False)
-        )
-        st.dataframe(section_summary, use_container_width=True, hide_index=True)
-
-    if not ignored_df.empty and selected_regime == "New":
-        with st.expander(
-            f"⚠️ Approved but not counted under New Regime (₹{ignored_amount:,.0f})",
-            expanded=False,
-        ):
-            st.dataframe(
-                ignored_df[["section", "investment_type", "approved_amount", "approved_at"]],
-                use_container_width=True,
-                hide_index=True,
-            )
-            st.caption(
-                "These were approved while you were on the Old Regime (or before you switched). "
-                "They do **not** affect your tax liability under the New Regime."
-            )
-
-    # ---- Live tax computation (uses the tax engine) ----
-    st.markdown("---")
-    st.markdown("### 🧮 Your Estimated Tax (Live Calculation)")
-    st.caption(
-        "Based on Salary, PLI, TDS uploaded by HR and your approved declarations. "
-        "Slabs as per Income Tax Act 2025."
-    )
-    tax_year_input = st.text_input(
-        "Tax Year",
-        value="2026-27",
-        key="my_tax_snapshot_year",
-    )
-    try:
-        tax_result = compute_employee_tax(employee_id, tax_year_input, selected_regime)
-    except Exception as e:
-        st.warning(f"Tax computation unavailable: {e}")
-        return
-
-    if tax_result["Total Income from Salary"] <= 0:
-        st.info(
-            "📄 No salary records uploaded by HR for this tax year yet. "
-            "Your tax computation will appear here once HR uploads your salary sheet."
-        )
-        return
-
-    tc1, tc2, tc3 = st.columns(3)
-    tc1.metric("Total Income", f"₹{tax_result['Total Income from Salary']:,.0f}")
-    tc2.metric("Taxable Salary", f"₹{tax_result['Taxable Salary']:,.0f}")
-    tc3.metric("Estimated Tax (incl. cess)", f"₹{tax_result['Tax3 (Total Tax after Cess)']:,.0f}")
-
-    tn1, tn2 = st.columns(2)
-    tn1.metric("TDS Already Paid", f"₹{tax_result['Tax4 (Total Deduction / TDS already paid)']:,.0f}")
-    net_tax = tax_result["Tax5 (Net Deductible)"]
-    tn2.metric(
-        "Net Tax Payable",
-        f"₹{net_tax:,.0f}",
-        delta="⚠️ Additional tax due" if net_tax > 0 else "✅ Fully covered by TDS",
-        delta_color="inverse" if net_tax > 0 else "normal",
-    )
-
-    with st.expander("🔍 See full 39-field tax computation", expanded=False):
-        full_df = pd.DataFrame(list(tax_result.items()), columns=["Field", "Value"])
-        st.dataframe(full_df, use_container_width=True, hide_index=True, height=400)
-        st.download_button(
-            "⬇️ Download my tax statement (CSV)",
-            full_df.to_csv(index=False).encode("utf-8"),
-            file_name=f"my_tax_{employee_id}_{tax_year_input}.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 # =====================================================
 # LOGOUT
@@ -4787,298 +2916,7 @@ def logout():
 
 
 
-# =====================================================
-# EMPLOYEE MASTER DATABASE + UPLOAD
-# =====================================================
 
-def init_employee_master_table():
-    conn = get_db_connection()
-    cur = conn.cursor()
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS employee_master (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            employee_id TEXT UNIQUE,
-            employee_name TEXT,
-            tax_regime TEXT,
-            pan_no TEXT,
-            gender TEXT,
-            date_of_joining TEXT,
-            date_of_exit TEXT,
-            dob TEXT,
-            designation TEXT,
-            uploaded_at TEXT
-        )
-    """)
-
-    required_columns = {
-        "email": "TEXT",
-        "doj": "TEXT",
-        "doe": "TEXT",
-        "department": "TEXT",
-        "branch": "TEXT",
-        "annual_salary": "REAL DEFAULT 0",
-        "monthly_salary": "REAL DEFAULT 0",
-        "basic_percent": "REAL DEFAULT 50",
-        "status": "TEXT DEFAULT 'Active'",
-        "upload_month": "TEXT",
-        "tax_year": "TEXT",
-        "created_at": "TEXT",
-        "updated_at": "TEXT"
-    }
-
-    cur.execute("PRAGMA table_info(employee_master)")
-    existing_cols = [row[1] for row in cur.fetchall()]
-
-    for col, col_type in required_columns.items():
-        if col not in existing_cols:
-            cur.execute(f"ALTER TABLE employee_master ADD COLUMN {col} {col_type}")
-
-    conn.commit()
-    conn.close()
-
-def normalize_employee_master_columns(df):
-    aliases = {
-        "EmployeeID": ["EmployeeID", "Employee ID", "Emp ID", "EmpCode", "Employee Code"],
-        "EmployeeName": ["EmployeeName", "Employee Name", "Emp Name", "Name"],
-        "Email": ["Email", "Email ID", "Official Email", "Official Email ID"],
-        "PAN": ["PAN", "PAN No", "Pan No.", "PAN Number"],
-        "Gender": ["Gender"],
-        "DOB": ["DOB", "Date of Birth"],
-        "DOJ": ["DOJ", "Date of Joining", "Joining Date"],
-        "DOE": ["DOE", "Date of Exit", "Exit Date"],
-        "Designation": ["Designation"],
-        "Department": ["Department"],
-        "Branch": ["Branch", "Location", "Base Location"],
-        "TaxRegime": ["TaxRegime", "Tax Regime", "Regime"],
-        "AnnualSalary": ["AnnualSalary", "Annual Salary", "Annual CTC", "CTC"],
-        "MonthlySalary": ["MonthlySalary", "Monthly Salary", "Salary"],
-        "BasicPercent": ["BasicPercent", "Basic Percent", "Basic %"],
-        "Status": ["Status", "Employee Status"]
-    }
-    current = {str(c).strip().lower().replace(" ", "").replace(".", "").replace("_", ""): c for c in df.columns}
-    rename_map = {}
-    for target, options in aliases.items():
-        for opt in options:
-            key = str(opt).strip().lower().replace(" ", "").replace(".", "").replace("_", "")
-            if key in current:
-                rename_map[current[key]] = target
-                break
-    return df.rename(columns=rename_map)
-
-
-def upload_employee_master(df, upload_month, tax_year):
-    init_employee_master_table()
-    df = normalize_employee_master_columns(df.copy()).fillna("")
-    required = ["EmployeeID", "EmployeeName", "Email", "PAN", "Gender", "DOB", "DOJ", "Designation", "Department", "Branch", "TaxRegime", "AnnualSalary", "MonthlySalary", "BasicPercent", "Status"]
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        return {"success": False, "message": "Missing columns: " + ", ".join(missing), "inserted": 0, "updated": 0, "errors": []}
-
-    inserted, updated, errors = 0, 0, []
-    conn = get_db_connection()
-    cur = conn.cursor()
-    for idx, row in df.iterrows():
-        try:
-            employee_id = normalize_employee_id(row.get("EmployeeID", ""))
-            if not employee_id:
-                errors.append(f"Row {idx + 2}: Missing Employee ID")
-                continue
-            def num(x, default=0):
-                try:
-                    return float(str(x).replace(",", "") or default)
-                except Exception:
-                    return default
-            vals = {
-                "employee_name": str(row.get("EmployeeName", "")).strip(),
-                "email": str(row.get("Email", "")).strip(),
-                "pan_no": str(row.get("PAN", "")).strip(),
-                "gender": str(row.get("Gender", "")).strip(),
-                "dob": str(row.get("DOB", "")).strip(),
-                "doj": str(row.get("DOJ", "")).strip(),
-                "doe": str(row.get("DOE", "")).strip(),
-                "designation": str(row.get("Designation", "")).strip(),
-                "department": str(row.get("Department", "")).strip(),
-                "branch": str(row.get("Branch", "")).strip(),
-                "tax_regime": str(row.get("TaxRegime", "New")).strip() or "New",
-                "annual_salary": num(row.get("AnnualSalary", 0)),
-                "monthly_salary": num(row.get("MonthlySalary", 0)),
-                "basic_percent": num(row.get("BasicPercent", 50), 50),
-                "status": str(row.get("Status", "Active")).strip() or "Active",
-                "upload_month": upload_month,
-                "tax_year": tax_year,
-                "now": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            }
-            cur.execute("SELECT employee_id FROM employee_master WHERE employee_id = ?", (employee_id,))
-            exists = cur.fetchone()
-            if exists:
-                cur.execute("""
-                    UPDATE employee_master SET employee_name=?, email=?, pan_no=?, gender=?, dob=?, doj=?, doe=?, designation=?, department=?, branch=?, tax_regime=?, annual_salary=?, monthly_salary=?, basic_percent=?, status=?, upload_month=?, tax_year=?, updated_at=? WHERE employee_id=?
-                """, (vals["employee_name"], vals["email"], vals["pan_no"], vals["gender"], vals["dob"], vals["doj"], vals["doe"], vals["designation"], vals["department"], vals["branch"], vals["tax_regime"], vals["annual_salary"], vals["monthly_salary"], vals["basic_percent"], vals["status"], vals["upload_month"], vals["tax_year"], vals["now"], employee_id))
-                updated += 1
-            else:
-                cur.execute("""
-                    INSERT INTO employee_master (employee_id, employee_name, email, pan_no, gender, dob, doj, doe, designation, department, branch, tax_regime, annual_salary, monthly_salary, basic_percent, status, upload_month, tax_year, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (employee_id, vals["employee_name"], vals["email"], vals["pan_no"], vals["gender"], vals["dob"], vals["doj"], vals["doe"], vals["designation"], vals["department"], vals["branch"], vals["tax_regime"], vals["annual_salary"], vals["monthly_salary"], vals["basic_percent"], vals["status"], vals["upload_month"], vals["tax_year"], vals["now"], vals["now"]))
-                inserted += 1
-        except Exception as e:
-            errors.append(f"Row {idx + 2}: {str(e)}")
-    conn.commit()
-    conn.close()
-    return {"success": True, "inserted": inserted, "updated": updated, "errors": errors}
-
-
-def load_employee_master():
-    init_employee_master_table()
-    conn = get_db_connection()
-    df = pd.read_sql_query("SELECT * FROM employee_master ORDER BY employee_id", conn)
-    conn.close()
-    return df.fillna("")
-
-def update_employee_master_record(employee_id, data):
-    conn = get_db_connection()
-    cur = conn.cursor()
-
-    cur.execute("""
-        UPDATE employee_master
-        SET employee_name = ?,
-            email = ?,
-            pan_no = ?,
-            gender = ?,
-            dob = ?,
-            doj = ?,
-            doe = ?,
-            designation = ?,
-            department = ?,
-            branch = ?,
-            tax_regime = ?,
-            annual_salary = ?,
-            monthly_salary = ?,
-            basic_percent = ?,
-            status = ?,
-            updated_at = ?
-        WHERE employee_id = ?
-    """, (
-        data["employee_name"],
-        data["email"],
-        data["pan_no"],
-        data["gender"],
-        data["dob"],
-        data["doj"],
-        data["doe"],
-        data["designation"],
-        data["department"],
-        data["branch"],
-        data["tax_regime"],
-        float(data["annual_salary"]),
-        float(data["monthly_salary"]),
-        float(data["basic_percent"]),
-        data["status"],
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        employee_id
-    ))
-
-    conn.commit()
-    conn.close()
-
-def delete_employee_master_record(employee_id):
-    conn = get_db_connection()
-    cur = conn.cursor()
-
-    cur.execute(
-        "DELETE FROM employee_master WHERE employee_id = ?",
-        (employee_id,)
-    )
-
-    conn.commit()
-    conn.close()
-
-def render_employee_master_upload_panel():
-    st.markdown("## 👥 Employee Master Upload")
-    st.caption("Upload or update employees for Koenig Stride payroll and tax computation.")
-    c1, c2 = st.columns(2)
-    with c1:
-        upload_month = month_selectbox("Upload Month", key="emp_master_upload_month")
-    with c2:
-        tax_year = st.text_input("Tax Year", value="2026-27", key="emp_master_tax_year")
-
-    with st.expander("Required Excel Format", expanded=False):
-        sample_df = pd.DataFrame([{
-            "EmployeeID": "1001", "EmployeeName": "Sample Employee", "Email": "employee@koenig-solutions.com",
-            "PAN": "ABCDE1234F", "Gender": "Male", "DOB": "1990-01-01", "DOJ": "2024-04-01",
-            "DOE": "", "Designation": "Executive", "Department": "Accounts", "Branch": "Delhi",
-            "TaxRegime": "New", "AnnualSalary": 1200000, "MonthlySalary": 100000, "BasicPercent": 40, "Status": "Active"
-        }])
-        st.dataframe(sample_df, use_container_width=True, hide_index=True)
-        dl_c1, dl_c2 = st.columns(2)
-        with dl_c1:
-            st.download_button(
-                "⬇️ Download Sample CSV",
-                sample_df.to_csv(index=False).encode("utf-8"),
-                file_name="employee_master_sample.csv",
-                mime="text/csv",
-                use_container_width=True
-            )
-        with dl_c2:
-            tpl_bytes = build_excel_template(list(sample_df.columns), sheet_name="Employee Master")
-            st.download_button(
-                "⬇️ Download Empty Template (.xlsx)",
-                tpl_bytes,
-                file_name="employee_master_template.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True
-            )
-
-    uploaded_file = st.file_uploader("Upload Employee Master Excel", type=["xlsx", "xls"], key="employee_master_excel_upload")
-    if uploaded_file is not None:
-        try:
-            xl = pd.ExcelFile(uploaded_file)
-            sheet_name = st.selectbox("Select Sheet", xl.sheet_names, key="employee_master_sheet")
-            df = normalize_employee_master_columns(pd.read_excel(uploaded_file, sheet_name=sheet_name).fillna(""))
-            st.success(f"File loaded successfully — {len(df)} record(s)")
-            st.dataframe(df.head(50), use_container_width=True, hide_index=True)
-            required = ["EmployeeID", "EmployeeName", "Email", "PAN", "Gender", "DOB", "DOJ", "Designation", "Department", "Branch", "TaxRegime", "AnnualSalary", "MonthlySalary", "BasicPercent", "Status"]
-            missing = [c for c in required if c not in df.columns]
-            if missing:
-                st.error("Missing columns: " + ", ".join(missing))
-            else:
-                st.success("All required columns found.")
-                if st.button("📤 Upload Employee Master", use_container_width=True):
-                    result = upload_employee_master(df, upload_month, tax_year)
-                    if result["success"]:
-                        st.success(
-                            f"Upload Complete | Inserted: {result['inserted']} | Updated: {result['updated']}"
-                        )
-
-                        st.cache_data.clear()
-
-                        saved_df = load_employee_master()
-
-                        st.markdown("### Saved Employee Master Records")
-                        st.dataframe(saved_df, use_container_width=True, hide_index=True)
-
-                        if result["errors"]:
-                            st.warning("Some rows had errors")
-                            st.dataframe(pd.DataFrame({"Errors": result["errors"]}))
-                    else:
-                        st.error(result["message"])
-        except Exception as e:
-            st.error(f"Upload failed: {e}")
-
-    st.markdown("---")
-    st.markdown("### Current Employee Master")
-    emp_df = load_employee_master()
-    if emp_df.empty:
-        st.info("No employee master records found yet.")
-    else:
-        st.dataframe(emp_df, use_container_width=True, hide_index=True)
-        st.download_button("⬇️ Download Current Employee Master", emp_df.to_csv(index=False).encode("utf-8"), file_name="current_employee_master.csv", mime="text/csv", use_container_width=True)
-
-try:
-    init_employee_master_table()
-except Exception as e:
-    st.warning(f"Employee master table initialization warning: {e}")
 
 
 
@@ -5384,39 +3222,378 @@ def render_question_analytics():
                     st.error(f"Could not clear log: {e}")
 
 
+# =====================================================
+# INTERACTIVE TAX CALCULATOR PANEL (Start Here → Tax Calculator tile)
+# Mirrors the reference Google Sheet design:
+#   Description | New Tax Regime | Old Tax Regime
+# with FY 2026-27 slabs and ₹ (Indian) number formatting.
+# =====================================================
 
-def render_investment_declaration_form():
-    """Embed Microsoft Form 12BB for tax regime and investment declaration.
+# Koenig salary-structure rules (for the educational expander)
+KOENIG_BASIC_PCT       = 0.50    # 50% of total
+KOENIG_HRA_PCT_OF_BASIC = 0.50   # 50% of Basic  →  25% of total
+KOENIG_MEAL_PASSES     = 105600  # ₹1,05,600 fixed
+KOENIG_REIMBURSEMENTS  = (
+    ("Telephone / Internet",       0.03),
+    ("Electricity Reimbursement",  0.03),
+    ("Professional / Software",    0.02),
+    ("Skill Development",          0.02),
+    ("Power & Utility Allowance",  0.02),
+)
 
-    Current scope: employees submit declared amounts only. Proof documents will
-    be collected later through Strides against these declaration entries.
+
+def _fmt_inr(n):
+    """Format a number in Indian (lakhs / crores) style with ₹ prefix."""
+    try:
+        n = int(round(float(n)))
+    except Exception:
+        return f"₹{n}"
+    s = str(abs(n))
+    if len(s) > 3:
+        last3 = s[-3:]
+        rest  = s[:-3]
+        groups = []
+        while len(rest) > 2:
+            groups.insert(0, rest[-2:])
+            rest = rest[:-2]
+        if rest:
+            groups.insert(0, rest)
+        s_formatted = ",".join(groups) + "," + last3
+    else:
+        s_formatted = s
+    return ("-" if n < 0 else "") + "₹" + s_formatted
+
+
+def _koenig_salary_split(gross):
+    """Return the Koenig auto-split for a given annual gross salary.
+    Order: Basic → HRA → Meal Passes → 5 reimbursements (each as % of total) →
+    leftover becomes Taxable Allowance. If salary is too small, Meal Passes
+    and reimbursements are clipped so Taxable Allowance never goes negative.
     """
-    st.markdown("## 📝 Tax Regime & Investment Declaration")
-    st.info(
-        "Please select your tax regime and submit estimated investment declaration amounts only. "
-        "Proof documents are not required at this stage. Proofs will be collected later in Strides."
+    gross = max(0, float(gross or 0))
+    basic = gross * KOENIG_BASIC_PCT
+    hra   = basic * KOENIG_HRA_PCT_OF_BASIC
+    remaining = gross - basic - hra
+
+    meal  = min(KOENIG_MEAL_PASSES, max(0, remaining))
+    remaining -= meal
+
+    reimb_rows = []
+    for label, pct in KOENIG_REIMBURSEMENTS:
+        amt = min(gross * pct, max(0, remaining))
+        reimb_rows.append((label, amt))
+        remaining -= amt
+
+    taxable_allowance = max(0, remaining)
+    return {
+        "Basic (50%)":           basic,
+        "HRA (25% of total)":    hra,
+        "Meal Passes / Sodexo":  meal,
+        **{label: amt for label, amt in reimb_rows},
+        "Taxable Allowance":     taxable_allowance,
+    }
+
+
+def _compute_tax(gross, std_ded, deductions_dict, slabs, rebate_cap):
+    """Return a dict with full row-by-row breakdown for one regime."""
+    ded_total = sum(deductions_dict.values())
+    taxable = max(0, gross - std_ded - ded_total)
+    base_tax = _tax_from_slabs(taxable, slabs)
+    rebate_applied = False
+    if taxable <= rebate_cap:
+        base_tax = 0.0
+        rebate_applied = True
+    cess = base_tax * 0.04
+    return {
+        "std_ded": std_ded,
+        "deductions_total": ded_total,
+        "taxable": taxable,
+        "tax": base_tax,
+        "cess": cess,
+        "total": base_tax + cess,
+        "rebate_applied": rebate_applied,
+    }
+
+
+def render_tax_calculator_panel():
+    """Interactive Tax Calculator — side-by-side New vs Old regime (FY 2026-27)."""
+    st.markdown("## 🧮 Tax Calculator (FY 2026-27)")
+    st.caption(
+        "Enter your annual gross salary and (optionally) your tax-saving "
+        "investments. Strides will compute tax under both regimes side-by-side "
+        "using the Income-tax Act, 2025 slabs."
     )
 
-    form_url = "https://forms.cloud.microsoft/r/fDqrnXZ9GN"
+    # ---- 1. Annual Gross Salary input ----
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        gross = st.number_input(
+            "Annual Gross Salary (₹)",
+            min_value=0, step=10000, value=1500000,
+            help="Your total annual CTC before any deductions.",
+            key="calc_gross_salary",
+        )
+    with col2:
+        st.markdown("&nbsp;", unsafe_allow_html=True)
+        st.metric("You entered", _fmt_inr(gross))
 
-    components.iframe(
-        form_url,
-        height=1600,
-        scrolling=True,
+    # ---- 2. Salary structure (collapsible) ----
+    with st.expander("📊 View Koenig salary-structure breakdown (optional)", expanded=False):
+        st.caption(
+            "Auto-split based on Koenig payroll rules: Basic 50% of CTC, HRA "
+            "25% of CTC, Meal Passes ₹1,05,600 (fixed), reimbursements 12%, "
+            "and the remainder becomes Taxable Allowance."
+        )
+        split = _koenig_salary_split(gross)
+        split_df = pd.DataFrame(
+            [(k, _fmt_inr(v)) for k, v in split.items()],
+            columns=["Component", "Annual Amount"],
+        )
+        st.dataframe(split_df, hide_index=True, use_container_width=True)
+        total_check = sum(split.values())
+        if abs(total_check - gross) > 1:
+            st.warning(
+                f"⚠️ At this salary level, the structure can't accommodate the "
+                f"full ₹1,05,600 Meal Passes — some components were proportionally "
+                f"reduced. Sum of split = {_fmt_inr(total_check)}."
+            )
+
+    st.markdown("---")
+
+    # ---- 3. Side-by-side regime inputs + outputs ----
+    new_col, old_col = st.columns(2)
+
+    # --- New Tax Regime ---
+    with new_col:
+        st.markdown("### 🆕 New Tax Regime")
+        st.caption("Standard deduction ₹75,000 · 87A rebate up to ₹12 L taxable.")
+        st.markdown("**Eligible deductions** (only these apply under New regime):")
+        new_meal = st.number_input(
+            "Meal Passes / Sodexo (₹)",
+            min_value=0, max_value=KOENIG_MEAL_PASSES, step=1000,
+            value=KOENIG_MEAL_PASSES,
+            help=f"Max ₹{KOENIG_MEAL_PASSES:,} per year. Tax-free perquisite.",
+            key="calc_new_meal",
+        )
+        new_nps2 = st.number_input(
+            "Employer NPS — Section 80CCD(2) (₹)",
+            min_value=0, step=1000, value=0,
+            help="Up to 14% of Basic (govt) / 10% of Basic (private). Enter actual employer contribution.",
+            key="calc_new_nps2",
+        )
+        new_deductions = {
+            "Meal Passes / Sodexo":      new_meal,
+            "Employer NPS 80CCD(2)":     new_nps2,
+        }
+        new_result = _compute_tax(
+            gross,
+            std_ded=TAX_CALC_NEW_STD_DED,
+            deductions_dict=new_deductions,
+            slabs=TAX_CALC_NEW_SLABS,
+            rebate_cap=TAX_CALC_NEW_REBATE_UP,
+        )
+
+    # --- Old Tax Regime ---
+    with old_col:
+        st.markdown("### 📜 Old Tax Regime")
+        st.caption("Standard deduction ₹50,000 · 87A rebate up to ₹5 L taxable.")
+        st.markdown("**Eligible deductions:**")
+        old_80c = st.number_input(
+            "Section 80C (₹) — PF, PPF, ELSS, LIC, ...",
+            min_value=0, max_value=150000, step=1000, value=0,
+            help="Combined limit for 80C + 80CCC + 80CCD(1) is ₹1,50,000.",
+            key="calc_old_80c",
+        )
+        old_80d = st.number_input(
+            "Section 80D (₹) — health insurance",
+            min_value=0, max_value=100000, step=1000, value=0,
+            help="₹25,000 self/family (₹50,000 if senior) + ₹25,000 (₹50,000) for parents.",
+            key="calc_old_80d",
+        )
+        old_nps1b = st.number_input(
+            "NPS — Section 80CCD(1B) (₹)",
+            min_value=0, max_value=50000, step=1000, value=0,
+            help="Additional ₹50,000 over and above 80C.",
+            key="calc_old_nps1b",
+        )
+        old_hra = st.number_input(
+            "HRA exemption (₹)",
+            min_value=0, step=1000, value=0,
+            help="Least of: actual HRA / rent–10% of Basic / 50% (metro) or 40% (non-metro) of Basic.",
+            key="calc_old_hra",
+        )
+        old_home_loan = st.number_input(
+            "Home Loan Interest — Sec 24(b) (₹)",
+            min_value=0, max_value=200000, step=1000, value=0,
+            help="Up to ₹2,00,000 for self-occupied property.",
+            key="calc_old_home_loan",
+        )
+        old_other = st.number_input(
+            "Other deductions — 80E, 80G, LTA, etc. (₹)",
+            min_value=0, step=1000, value=0,
+            help="Education loan interest (80E), donations (80G), LTA travel reimbursement, etc.",
+            key="calc_old_other",
+        )
+        old_meal = st.number_input(
+            "Meal Passes / Sodexo (₹)",
+            min_value=0, max_value=KOENIG_MEAL_PASSES, step=1000,
+            value=KOENIG_MEAL_PASSES,
+            help=f"Max ₹{KOENIG_MEAL_PASSES:,} per year. Tax-free under both regimes.",
+            key="calc_old_meal",
+        )
+        old_nps2 = st.number_input(
+            "Employer NPS — 80CCD(2) (₹)",
+            min_value=0, step=1000, value=0,
+            key="calc_old_nps2",
+        )
+        old_deductions = {
+            "Section 80C":            old_80c,
+            "Section 80D":            old_80d,
+            "NPS 80CCD(1B)":          old_nps1b,
+            "HRA exemption":          old_hra,
+            "Home Loan Interest":     old_home_loan,
+            "Other deductions":       old_other,
+            "Meal Passes / Sodexo":   old_meal,
+            "Employer NPS 80CCD(2)":  old_nps2,
+        }
+        old_result = _compute_tax(
+            gross,
+            std_ded=TAX_CALC_OLD_STD_DED,
+            deductions_dict=old_deductions,
+            slabs=TAX_CALC_OLD_SLABS,
+            rebate_cap=TAX_CALC_OLD_REBATE_UP,
+        )
+
+    st.markdown("---")
+
+    # ---- 4. Side-by-side results table (mirrors the reference Google Sheet) ----
+    st.markdown("### 📊 Tax Computation Summary")
+    summary_rows = [
+        ("Gross Income",            _fmt_inr(gross),                           _fmt_inr(gross)),
+        ("Standard Deduction",      _fmt_inr(new_result["std_ded"]),           _fmt_inr(old_result["std_ded"])),
+        ("Total Other Deductions",  _fmt_inr(new_result["deductions_total"]),  _fmt_inr(old_result["deductions_total"])),
+        ("Taxable Income",          _fmt_inr(new_result["taxable"]),           _fmt_inr(old_result["taxable"])),
+        ("Slab Tax",                _fmt_inr(new_result["tax"]),               _fmt_inr(old_result["tax"])),
+        ("Health & Education Cess (4%)", _fmt_inr(new_result["cess"]),         _fmt_inr(old_result["cess"])),
+        ("Section 87A Rebate",      "Applied" if new_result["rebate_applied"] else "Not eligible",
+                                    "Applied" if old_result["rebate_applied"] else "Not eligible"),
+        ("💰 TOTAL TAX PAYABLE",     _fmt_inr(new_result["total"]),             _fmt_inr(old_result["total"])),
+    ]
+    summary_df = pd.DataFrame(summary_rows, columns=["Description", "New Tax Regime", "Old Tax Regime"])
+    st.dataframe(summary_df, hide_index=True, use_container_width=True)
+
+    # ---- 5. Savings banner ----
+    diff = old_result["total"] - new_result["total"]
+    if abs(diff) < 1:
+        st.info("⚖️ Both regimes produce the same tax for this scenario.")
+    elif diff > 0:
+        st.success(
+            f"✅ **New Regime saves you {_fmt_inr(diff)}** over the Old regime "
+            f"in this scenario."
+        )
+    else:
+        st.success(
+            f"✅ **Old Regime saves you {_fmt_inr(-diff)}** over the New regime "
+            f"in this scenario."
+        )
+
+    # ---- 6. CSV download ----
+    csv_bytes = summary_df.to_csv(index=False).encode("utf-8-sig")
+    st.download_button(
+        "⬇️ Download summary as CSV",
+        data=csv_bytes,
+        file_name=f"strides_tax_calculation_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+        mime="text/csv",
+        use_container_width=True,
     )
 
     st.markdown(
-        "<div style='font-size:12px;color:#64748b;margin-top:10px;'>"
-        "If the form does not load inside Strides, please open it directly: "
-        "<a href='https://forms.cloud.microsoft/r/fDqrnXZ9GN' target='_blank'>Open Declaration Form</a>"
+        "<div style='margin-top:12px;font-size:12px;color:#64748b;font-style:italic;'>"
+        "This is an estimate based only on what you entered. "
+        "If there is any doubt, you may verify with the Tax team at "
+        "<a href='mailto:tax@koenig-solutions.com'>tax@koenig-solutions.com</a>."
         "</div>",
         unsafe_allow_html=True,
     )
 
+
+def render_home_admin_charts():
+    """Admin-only mini-dashboard shown on the Home panel.
+
+    Four KPIs:
+      1. Total questions asked
+      2. Not available in record (gap)
+      3. Diverted to SPOC (protected answers)
+      4. Tax FAQs vs Entity Nexus split
+
+    Plus a small bar chart visualising the breakdown.
+    """
+    st.markdown("---")
+    st.markdown("### 📊 Strides usage at a glance")
+    st.caption("Admin view — live numbers from the Ask Strides query log.")
+
+    try:
+        _ensure_query_log_table()
+        conn = sqlite3.connect(DB_PATH)
+        df = pd.read_sql_query(
+            "SELECT query, in_record, response_type, source FROM query_log",
+            conn,
+        )
+        conn.close()
+    except Exception as e:
+        st.info(f"Query log not yet available ({e}).")
+        return
+
+    if df.empty:
+        st.info("No questions logged yet. Metrics will appear once employees start using Ask Strides.")
+        return
+
+    total          = len(df)
+    not_in_record  = int((df["in_record"] == 0).sum())
+    diverted_spoc  = int((df["response_type"] == "protected").sum())
+
+    src_lower      = df["source"].astype(str).str.lower()
+    tax_count      = int((df["in_record"] == 1)
+                         .where(src_lower.str.contains("tax"), False).sum())
+    nexus_count    = int((df["in_record"] == 1)
+                         .where(src_lower.str.contains("entity"), False).sum())
+
+    # ---- KPI cards ----
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("💬 Total questions asked", f"{total:,}")
+    c2.metric("❓ Not in record",         f"{not_in_record:,}",
+              f"{(not_in_record/total*100):.1f}%" if total else "0%")
+    c3.metric("📞 Diverted to SPOC",     f"{diverted_spoc:,}")
+    c4.metric("🧾 Tax / 🏢 Entity Nexus",
+              f"{tax_count:,} / {nexus_count:,}")
+
+    # ---- Combined breakdown chart ----
+    chart_df = pd.DataFrame({
+        "Category": [
+            "Tax FAQs",
+            "Entity Nexus",
+            "Diverted to SPOC",
+            "Not in record",
+        ],
+        "Questions": [
+            tax_count,
+            nexus_count,
+            diverted_spoc,
+            not_in_record,
+        ],
+    })
+    if chart_df["Questions"].sum() > 0:
+        st.bar_chart(chart_df.set_index("Category"), height=240)
+    st.caption(
+        "Open **Question Analytics** in the sidebar for the full query log, "
+        "daily volume trend, and the list of unanswered questions to add as new FAQs."
+    )
+
+
 def render_admin_analytics_dashboard():
-    """High-level admin analytics: users, declarations, knowledge, payroll."""
+    """High-level admin analytics: users, knowledge base, storage, audit log."""
     st.markdown("## 📈 Admin Analytics")
-    st.caption("Overview of platform usage, declarations, and data health.")
+    st.caption("Overview of platform usage and data health.")
 
     # ---------------- Users ----------------
     try:
@@ -5434,67 +3611,6 @@ def render_admin_analytics_dashboard():
     c2.metric("Active", active_users)
     c3.metric("Employees", employees)
     c4.metric("Admins", admins)
-
-    # ---------------- Declarations ----------------
-    st.markdown("### 🧾 Declarations")
-    try:
-        decl_df = load_employee_declarations()
-    except Exception:
-        decl_df = pd.DataFrame()
-
-    if decl_df.empty:
-        st.info("No declarations submitted yet.")
-    else:
-        total_decl = len(decl_df)
-        pending = int((decl_df["status"].astype(str) == "Pending").sum())
-        approved = int((decl_df["status"].astype(str) == "Approved").sum())
-        rejected = int((decl_df["status"].astype(str) == "Rejected").sum())
-
-        d1, d2, d3, d4 = st.columns(4)
-        d1.metric("Total Declarations", total_decl)
-        d2.metric("Pending", pending)
-        d3.metric("Approved", approved)
-        d4.metric("Rejected", rejected)
-
-        try:
-            claimed_total = float(decl_df.get("claimed_amount", pd.Series(dtype=float)).sum() or 0)
-            approved_total = float(decl_df[decl_df["status"].astype(str) == "Approved"]
-                                   .get("approved_amount", pd.Series(dtype=float)).sum() or 0)
-            a1, a2 = st.columns(2)
-            a1.metric("Total Claimed", f"₹{claimed_total:,.0f}")
-            a2.metric("Total Approved", f"₹{approved_total:,.0f}")
-        except Exception:
-            pass
-
-        # Declarations by section
-        if "section" in decl_df.columns:
-            with st.expander("📊 Declarations by Section", expanded=False):
-                by_section = (
-                    decl_df.groupby("section")
-                    .agg(
-                        count=("id", "count"),
-                        claimed=("claimed_amount", "sum"),
-                    )
-                    .reset_index()
-                    .sort_values("count", ascending=False)
-                )
-                st.dataframe(by_section, use_container_width=True, hide_index=True)
-                try:
-                    st.bar_chart(by_section.set_index("section")["count"])
-                except Exception:
-                    pass
-
-        # Top employees by declaration count
-        if "employee_id" in decl_df.columns:
-            with st.expander("👤 Top Employees by Declarations", expanded=False):
-                top_emp = (
-                    decl_df.groupby(["employee_id", "employee_name"])
-                    .size()
-                    .reset_index(name="declarations")
-                    .sort_values("declarations", ascending=False)
-                    .head(10)
-                )
-                st.dataframe(top_emp, use_container_width=True, hide_index=True)
 
     # ---------------- Knowledge base ----------------
     st.markdown("### 📚 Knowledge Base")
@@ -5520,42 +3636,17 @@ def render_admin_analytics_dashboard():
             except Exception:
                 pass
 
-    # ---------------- Payroll ----------------
-    st.markdown("### 💼 Payroll Database")
-    try:
-        init_payroll_database()  # ensure tables exist before counting
-        conn = get_db_connection()
-        emp_master_n = conn.execute("SELECT COUNT(*) FROM employee_master").fetchone()[0]
-        salary_n = conn.execute("SELECT COUNT(*) FROM employee_salary_monthly").fetchone()[0]
-        pli_n = conn.execute("SELECT COUNT(*) FROM employee_pli_monthly").fetchone()[0]
-        tds_n = conn.execute("SELECT COUNT(*) FROM employee_tds_monthly").fetchone()[0]
-        inv_n = conn.execute("SELECT COUNT(*) FROM employee_investments").fetchone()[0]
-        conn.close()
-    except Exception:
-        emp_master_n = salary_n = pli_n = tds_n = inv_n = 0
-
-    p1, p2, p3, p4, p5 = st.columns(5)
-    p1.metric("Employee Master", emp_master_n)
-    p2.metric("Salary Records", salary_n)
-    p3.metric("PLI Records", pli_n)
-    p4.metric("TDS Records", tds_n)
-    p5.metric("Investment Rows", inv_n)
-
     # ---------------- Storage health (Streamlit Cloud warning) ----------------
     st.markdown("### ⚠️ Storage Health")
     try:
         db_size = DB_PATH.stat().st_size / 1024 if DB_PATH.exists() else 0
-        proof_count = sum(1 for _ in PROOF_FOLDER.glob("*")) if PROOF_FOLDER.exists() else 0
     except Exception:
         db_size = 0
-        proof_count = 0
-    s1, s2 = st.columns(2)
+    s1, _ = st.columns(2)
     s1.metric("SQLite DB size", f"{db_size:,.1f} KB")
-    s2.metric("Proof files stored", proof_count)
     st.warning(
-        "⚠️ **Streamlit Cloud filesystem is ephemeral.** SQLite data and proof "
-        "uploads will be wiped on container restart. Plan a Postgres + S3 migration "
-        "before going live with real employees."
+        "⚠️ **Streamlit Cloud filesystem is ephemeral.** SQLite data will be "
+        "wiped on container restart. Plan a Postgres migration before going live."
     )
 
     # ---------------- Audit log ----------------
@@ -5656,18 +3747,9 @@ with left:
         st.markdown("### 🤖 Assistant")
         panel_button("💬 Ask Strides", "Ask Strides")
 
-        st.markdown("---")
-        st.markdown("### 🧾 Employee Tax")
-        panel_button("🧾 Employee Declaration", "Employee Declaration")
-        panel_button("📝 Tax Regime & Investment Declaration", "Tax Regime & Investment Declaration")
-        panel_button("📊 My Tax Snapshot", "My Tax Snapshot")
-
         if st.session_state.role == "Admin":
             st.markdown("---")
             st.markdown("### 🛠️ Admin")
-            panel_button("👥 Employee Master Upload", "Employee Master Upload")
-            panel_button("💼 Payroll & Tax Engine", "Payroll Tax Engine")
-            panel_button("✅ Declaration Approval", "Declaration Approval")
             panel_button("👥 User Management", "User Management")
             panel_button("📚 Knowledge Base", "Knowledge Base")
             panel_button("📊 Question Analytics", "Question Analytics")
@@ -5677,8 +3759,7 @@ with right:
     selected_panel = st.session_state.get("selected_panel", "Home")
 
     locked_panels = [
-        "Ask Strides", "Employee Declaration", "My Tax Snapshot",
-        "Payroll Tax Engine", "Declaration Approval", "User Management",
+        "Ask Strides", "User Management",
         "Knowledge Base", "Question Analytics", "Admin Analytics"
     ]
 
@@ -5699,9 +3780,13 @@ with right:
         </div>
         """, unsafe_allow_html=True)
         st.info(
-            "👉 Click **🚀 Start Here** in the left sidebar to unlock Ask Strides, "
-            "Employee Declarations, and (for Admins) the Payroll & Approval panels."
+            "👉 Click **🚀 Start Here** in the left sidebar to unlock Ask Strides "
+            "and the Tax FAQ explorer."
         )
+
+        # ---- Admin-only mini-dashboard on Home ----
+        if st.session_state.role == "Admin":
+            render_home_admin_charts()
 
 
     # =====================================================
@@ -5720,6 +3805,7 @@ with right:
         st.markdown("### Select Area")
         modules = [
             ("✅ Tax FAQs", "Tax FAQs"),
+            ("🧮 Tax Calculator", "Tax Calculator"),
             ("✅ Salary Queries", "Salary Queries"),
             ("⚖️ Labour Code", "Labour Code"),
             ("✅ Entity Nexus", "Entity Nexus"),
@@ -5727,7 +3813,7 @@ with right:
             ("🔒 Protected Information Routing", "Protected Information Routing"),
             ("✅ Compliance Support", "Compliance Support"),
         ]
-        rows = [st.columns(2), st.columns(2), st.columns(2), st.columns(1)]
+        rows = [st.columns(2), st.columns(2), st.columns(2), st.columns(2)]
         flat_cols = rows[0] + rows[1] + rows[2] + rows[3]
         for i, (label, module_name) in enumerate(modules):
             with flat_cols[i]:
@@ -5744,6 +3830,12 @@ with right:
                 st.markdown(f"<span class='selected-pill'>Selected: {selected}</span>", unsafe_allow_html=True)
                 st.markdown("### 📞 SPOC Directory")
                 render_spoc_routing()
+                st.markdown("</div>", unsafe_allow_html=True)
+            # Tax Calculator — interactive computation, no FAQ browsing.
+            elif selected == "Tax Calculator":
+                st.markdown("<div class='card'>", unsafe_allow_html=True)
+                st.markdown(f"<span class='selected-pill'>Selected: {selected}</span>", unsafe_allow_html=True)
+                render_tax_calculator_panel()
                 st.markdown("</div>", unsafe_allow_html=True)
             else:
                 st.markdown("<div class='card'>", unsafe_allow_html=True)
@@ -5799,23 +3891,8 @@ with right:
         st.markdown("</div>", unsafe_allow_html=True)
 
     # =====================================================
-    # EMPLOYEE DECLARATION PANEL
-    # =====================================================
-    elif selected_panel == "Employee Declaration":
-        render_employee_declaration_portal()
-
-    # =====================================================
-    # TAX SNAPSHOT PANEL
-    # =====================================================
-    elif selected_panel == "My Tax Snapshot":
-        render_employee_tax_summary_snapshot()
-
-    # =====================================================
     # ASK STRIDES PANEL (formerly Ask Sarika)
     # =====================================================
-    elif selected_panel == "Tax Regime & Investment Declaration":
-        render_investment_declaration_form()
-
     elif selected_panel in ("Ask Strides", "Ask Sarika"):  # legacy panel name supported
         st.markdown("## 💬 Ask Strides")
         st.markdown(
@@ -5853,7 +3930,20 @@ with right:
                             </div>
                             """, unsafe_allow_html=True)
                         else:
+                            # Yellow banner for AI-generated answers (everything
+                            # except the deterministic Live Tax Calculator).
                             st.markdown(item["answer"])
+                            # Soft footnote on non-deterministic answers — no
+                            # alarmist banner, just a gentle pointer if the user
+                            # wants to double-check.
+                            if item.get("ai_generated") and item.get("source") != "Live Tax Calculator" and not item.get("chitchat"):
+                                st.markdown(
+                                    "<div style='margin-top:8px;font-size:12px;color:#64748b;font-style:italic;'>"
+                                    "If there is any doubt, you may verify with the Tax team at "
+                                    "<a href='mailto:tax@koenig-solutions.com'>tax@koenig-solutions.com</a>."
+                                    "</div>",
+                                    unsafe_allow_html=True,
+                                )
 
                         if st.session_state.role == "Admin":
                             st.caption(
@@ -5878,15 +3968,6 @@ with right:
     # =====================================================
     # ADMIN PANELS
     # =====================================================
-    elif selected_panel == "Employee Master Upload" and st.session_state.role == "Admin":
-        render_employee_master_upload_panel()
-
-    elif selected_panel == "Payroll Tax Engine" and st.session_state.role == "Admin":
-        render_payroll_tax_engine_panel()
-
-    elif selected_panel == "Declaration Approval" and st.session_state.role == "Admin":
-        render_admin_declaration_approval_panel()
-
     elif selected_panel == "User Management" and st.session_state.role == "Admin":
         st.markdown("## 👥 User Management")
         st.markdown("<div class='card'>", unsafe_allow_html=True)
