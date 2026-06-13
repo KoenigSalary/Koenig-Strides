@@ -19,12 +19,12 @@ except Exception:
     AI_AVAILABLE = False
 
 # =====================================================
-# KOENIG STRIDE - POLISHED LOGIN UI + RESPONSIVE
+# KOENIG STRIDES - POLISHED LOGIN UI + RESPONSIVE
 # Streamlit-native layout, no broken HTML wrappers
 # =====================================================
 
 st.set_page_config(
-    page_title="Koenig Stride",
+    page_title="Koenig Strides",
     page_icon="🤖",
     layout="wide",
     initial_sidebar_state="collapsed"
@@ -32,7 +32,7 @@ st.set_page_config(
 
 # =====================================================
 # RMS EMBED / SSO LAYER
-# Allows Koenig-Stride to be embedded inside RMS as an external app.
+# Allows Koenig-Strides to be embedded inside RMS as an external app.
 # Supports query params:
 #   ?embed=true                   → hide Streamlit chrome (header/footer/menu)
 #   ?panel=ask-strides            → deep-link to a specific panel after login
@@ -202,7 +202,7 @@ EXCEL_PATH = BASE_DIR / "knowledge" / "Koenig_VoiceBot_FAQ_Master.xlsx"
 LOGO_PATH = BASE_DIR / "assets" / "koenig_logo.png"
 SARIKA_PATH = BASE_DIR / "assets" / "sarika.png"
 USERS_PATH = BASE_DIR / "users.csv"
-DB_PATH = BASE_DIR / "koenig_stride.db"
+DB_PATH = BASE_DIR / "koenig_strides.db"
 
 
 DEFAULT_EMPLOYEE_PASSWORD = "Welcome@123"
@@ -1159,12 +1159,12 @@ def login_screen():
         else:
             st.markdown("<div class='login-logo-wrap'><h2 style='color:#04123d;'>KOENIG</h2></div>", unsafe_allow_html=True)
 
-        # 2. Koenig Stride title (under logo, brand-colored)
+        # 2. Koenig Strides title (under logo, brand-colored)
         st.markdown("""
         <div class='login-stack'>
             <div class='login-title-row'>
                 <div class='login-title-icon'>☻</div>
-                <h1 class='login-title-text'>Koenig Stride</h1>
+                <h1 class='login-title-text'>Koenig Strides</h1>
             </div>
             <div class='login-subtitle'>Tax &amp; Entity Nexus Assistant — Step Forward</div>
         </div>
@@ -1173,7 +1173,7 @@ def login_screen():
         # 3. Welcome hero (under title)
         st.markdown("""
         <div class='login-hero-card'>
-            <h2>Welcome to Koenig Stride</h2>
+            <h2>Welcome to Koenig Strides</h2>
             <p>Your secure internal assistant for tax, salary, entity and SPOC guidance.</p>
         </div>
         """, unsafe_allow_html=True)
@@ -1251,10 +1251,10 @@ def _render_rms_only_gate():
     st.markdown(f"""
     <div class='rms-gate-wrap'>
       <div class='rms-gate-card'>
-        <div class='rms-gate-title'>🔐 Please open Koenig Stride from the RMS portal</div>
+        <div class='rms-gate-title'>🔐 Please open Koenig Strides from the RMS portal</div>
         <p class='rms-gate-sub'>
-          Koenig Stride uses your RMS identity — there's no separate login.<br>
-          Sign in to RMS and click the <b>Koenig Stride</b> tile.
+          Koenig Strides uses your RMS identity — there's no separate login.<br>
+          Sign in to RMS and click the <b>Koenig Strides</b> tile.
         </p>
         <a class='rms-gate-btn' href='{rms_url}' target='_blank'>Go to RMS Portal →</a>
       </div>
@@ -1270,7 +1270,7 @@ def force_password_change_screen():
     with c2:
         st.markdown("<div class='card'>", unsafe_allow_html=True)
         st.markdown("## 🔐 Change Password Required")
-        st.info("For security, please change your default password before using Koenig Stride.")
+        st.info("For security, please change your default password before using Koenig Strides.")
         new_password = st.text_input("New Password", type="password")
         confirm_password = st.text_input("Confirm New Password", type="password")
         if st.button("Update Password", use_container_width=True):
@@ -1718,7 +1718,7 @@ def render_answer(row):
         email_html = f"<br><b>Email:</b> {email}" if email else ""
         st.markdown(f"<div class='protected-box'><b>🔒 Protected Information</b><br>This information is protected and cannot be displayed here.<br><br>Please contact the designated SPOC:<br><b>SPOC:</b> {spoc}{email_html}</div>", unsafe_allow_html=True)
     else:
-        st.markdown(f"<div class='answer-box'><b>Koenig Stride Answer:</b><br>{get_answer_text(row)}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='answer-box'><b>Koenig Strides Answer:</b><br>{get_answer_text(row)}</div>", unsafe_allow_html=True)
 
 # =====================================================
 # SEARCH
@@ -1861,7 +1861,7 @@ Email: {safe_get(row, 'SPOC Email')}
             "question. Answer based on it directly.\n"
         )
 
-    prompt = f"""You are **Koenig Stride**, an internal assistant for Koenig Solutions employees
+    prompt = f"""You are **Koenig Strides**, an internal assistant for Koenig Solutions employees
 on Indian tax, payroll, HR, labour code, entity nexus and SPOC routing.
 
 STRICT RULES — follow without exception:
@@ -3286,7 +3286,7 @@ def render_admin_analytics_dashboard():
             st.download_button(
                 "⬇️ Download full audit log (.csv)",
                 audit_df.to_csv(index=False).encode("utf-8"),
-                file_name="koenig_stride_audit_log.csv",
+                file_name="koenig_strides_audit_log.csv",
                 mime="text/csv",
                 use_container_width=True,
             )
@@ -3325,7 +3325,7 @@ with top2:
     st.markdown("""
     <div class='brand-row'>
         <div class='bot-icon'>☻</div>
-        <h1 class='brand-title'>Koenig Stride</h1>
+        <h1 class='brand-title'>Koenig Strides</h1>
     </div>
     <div class='brand-subtitle'>Tax & Entity Nexus Assistant — Step Forward</div>
     """, unsafe_allow_html=True)
@@ -3395,7 +3395,7 @@ with right:
     if selected_panel == "Home":
         st.markdown("""
         <div class='hero' style='margin-top:24px;'>
-            <h2>Welcome to Koenig Stride</h2>
+            <h2>Welcome to Koenig Strides</h2>
             <p>Select a panel from the left sidebar,<br>or use Ask Strides to ask directly.</p>
         </div>
         """, unsafe_allow_html=True)
@@ -3529,7 +3529,7 @@ with right:
                 with st.chat_message("assistant", avatar="👩‍💼"):
                     st.markdown(
                         f"Hi **{st.session_state.employee_name}** 👋  \n"
-                        "I'm **Strides**, your Koenig Stride assistant. "
+                        "I'm **Strides**, your Koenig Strides assistant. "
                         "Ask me anything about **Tax, Salary, Labour Code, Entity Nexus** or **SPOC routing**."
                     )
             else:
