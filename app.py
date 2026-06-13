@@ -4,10 +4,8 @@ from pathlib import Path
 import base64
 import hashlib
 import html
-import io
 import re
 import uuid
-from datetime import datetime
 import sqlite3
 import numpy as np
 
@@ -2463,6 +2461,10 @@ def submit_query(query):
     })
     log_query(query, "answer", top, sim)
 
+    # Cap session chat history at 100 turns to prevent unbounded memory growth.
+    if len(st.session_state.chat_history) > 100:
+        st.session_state.chat_history = st.session_state.chat_history[-100:]
+
 
 # =====================================================
 # PAYROLL + TAX DATABASE FOUNDATION
@@ -2474,52 +2476,6 @@ def get_db_connection():
     return conn
 
 
-def add_column_if_missing(cur, table_name, column_name, column_definition):
-    cur.execute(f"PRAGMA table_info({table_name})")
-    existing_columns = [row[1] for row in cur.fetchall()]
-
-    if column_name not in existing_columns:
-        cur.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}")
-
-
-def _drop_legacy_payroll_tables_once():
-    """One-time cleanup: drop the obsolete payroll/declaration tables that were
-    removed in May 2026.
-
-    Tables: employee_master, employee_salary_monthly, employee_pli_monthly,
-            employee_tds_monthly, employee_tax_computation, employee_investments,
-            salary_structure_master.
-
-    Idempotent and safe — each table is dropped via DROP TABLE IF EXISTS.
-    """
-    if st.session_state.get("_legacy_tables_dropped"):
-        return
-    st.session_state["_legacy_tables_dropped"] = True
-    legacy_tables = [
-        "employee_master",
-        "employee_salary_monthly",
-        "employee_pli_monthly",
-        "employee_tds_monthly",
-        "employee_tax_computation",
-        "employee_investments",
-        "salary_structure_master",
-    ]
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        for t in legacy_tables:
-            try:
-                cur.execute(f"DROP TABLE IF EXISTS {t}")
-            except Exception:
-                pass
-        conn.commit()
-        conn.close()
-    except Exception:
-        pass
-
-
-# Run the one-time drop on every fresh session — cheap, idempotent.
-_drop_legacy_payroll_tables_once()
 
 
 def _ensure_audit_log_table():
@@ -2573,131 +2529,13 @@ def write_audit_log(action, target_id="", details=""):
 
 
 
-def normalize_header(value):
-    return (
-        str(value)
-        .strip()
-        .lower()
-        .replace("\n", " ")
-        .replace("\r", " ")
-        .replace(".", "")
-        .replace("_", " ")
-        .replace("-", " ")
-    )
-
-
-# Aliases shorter than this won't be matched as substrings to prevent
-# accidental matches like "OT" -> "TotalDays".
-_MIN_FUZZY_LEN = 4
-
-
-def find_column(df, possible_names, exact_only=False):
-    """Resolve a logical column to its actual Excel header.
-
-    Strategy:
-      1. Exact match on normalized headers (case + punctuation insensitive).
-      2. Fuzzy substring match — BUT only for aliases of length >= 4 to avoid
-         false positives like "OT" matching "TotalDays" or "PF" matching
-         "BasicPercent". Short aliases must match exactly.
-
-    Pass exact_only=True to disable fuzzy matching entirely (use when a column
-    name like "Total Income From Salary" could be confused with a shorter
-    header like "Salary").
-    """
-    normalized_cols = {normalize_header(c): c for c in df.columns}
-    possible_norm = [normalize_header(x) for x in possible_names]
-
-    # Pass 1: exact match
-    for p in possible_norm:
-        if p in normalized_cols:
-            return normalized_cols[p]
-
-    if exact_only:
-        return None
-
-    # Pass 2: fuzzy substring match, but only for sufficiently long aliases
-    for p in possible_norm:
-        if len(p) < _MIN_FUZZY_LEN:
-            continue
-        for norm_col, original_col in normalized_cols.items():
-            if p in norm_col or norm_col in p:
-                return original_col
 
-    return None
 
 
-def money_value(row, col):
-    if not col:
-        return 0.0
-    try:
-        value = row.get(col, 0)
-        if pd.isna(value):
-            return 0.0
-        return float(str(value).replace(",", "").strip() or 0)
-    except Exception:
-        return 0.0
 
 
-def text_value(row, col):
-    if not col:
-        return ""
-    try:
-        value = row.get(col, "")
-        if pd.isna(value):
-            return ""
-        return str(value).strip()
-    except Exception:
-        return ""
-
-
-def normalize_employee_id(value):
-    """Normalize Employee ID to a clean string.
-
-    Rules:
-    - NaN / None / blanks → ""
-    - Strip whitespace
-    - Strip trailing ".0" from floats read by pandas (e.g. 1086.0 → "1086")
-    - Strip leading zeros from purely numeric IDs (e.g. "00123" → "123")
-      (only if result is still non-empty; preserves "0" as "0")
-    - Preserves alphanumeric IDs as-is (e.g. "EMP-001" stays "EMP-001")
-    """
-    try:
-        if value is None:
-            return ""
-        if isinstance(value, float) and pd.isna(value):
-            return ""
-        # Handle numeric types (int/float) cleanly
-        if isinstance(value, float):
-            if value.is_integer():
-                return str(int(value))
-            return str(value).strip()
-        if isinstance(value, int):
-            return str(value)
-        s = str(value).strip()
-        if not s or s.lower() in ("nan", "none", "null"):
-            return ""
-        # Strip trailing ".0" pattern (e.g. "1086.0")
-        if s.endswith(".0"):
-            head = s[:-2]
-            if head.lstrip("-").isdigit():
-                s = head
-        # Strip leading zeros only for purely numeric strings, but keep "0"
-        if s.isdigit():
-            stripped = s.lstrip("0")
-            s = stripped if stripped else "0"
-        return s
-    except Exception:
-        return ""
 
 
-def employee_id_value(row, col):
-    """Read and normalize an Employee ID from a dataframe row."""
-    if not col:
-        return ""
-    try:
-        return normalize_employee_id(row.get(col, ""))
-    except Exception:
-        return ""
 
 
 
@@ -2716,42 +2554,8 @@ def employee_id_value(row, col):
 
 
 
-# ---- Standard month helpers (Indian Financial Year: April → March) ----
-FY_MONTHS = [
-    "April", "May", "June", "July", "August", "September",
-    "October", "November", "December", "January", "February", "March"
-]
-
-
-
-
 
 
-# ---- Excel template builder for upload panels ----
-UPLOAD_TEMPLATES = {
-    "Employee Master": [
-        "Employee ID", "Employee Name", "Tax Regime", "PAN No", "Gender",
-        "Date of Joining", "Date of Exit", "DOB", "Designation"
-    ],
-    "Salary Computation": [
-        "Employee ID", "Employee Name", "Gross Salary", "Basic", "HRA",
-        "Sodexo / Meal Passes", "Telephone / Internet", "Electricity Reimbursement",
-        "Professional / Software", "Skill Development", "Power & Utility Allowance",
-        "Taxable Allowance", "OT / PLI / Profit Sharing", "Ex-Gratia",
-        "Gratuity", "Severance", "Leave Encashment", "Referral Bonus",
-        "Other Adjustment", "Total Income from Salary"
-    ],
-    "PLI / Incentive": [
-        "Employee ID", "Employee Name", "PLI", "Incentive",
-        "Performance Bonus", "Profit Sharing", "Other Variable Pay",
-        "Total Variable Pay", "Remarks"
-    ],
-    "TDS Deduction": [
-        "Employee ID", "Employee Name", "TDS Deducted",
-        "Total Tax", "Cess 4%", "Total Tax After Cess",
-        "Total Deduction", "Net Deductible"
-    ],
-}
 
 
 
@@ -2760,105 +2564,7 @@ UPLOAD_TEMPLATES = {
 
 
 
-# ----- Preview helpers: hide internal columns, prettify headers -----
 
-# Columns hidden from the user-facing preview (internal book-keeping)
-_HIDDEN_PREVIEW_COLS = {"id", "created_at", "updated_at"}
-
-# Map of raw DB column → pretty display label
-_PRETTY_PREVIEW_LABELS = {
-    "employee_id": "Employee ID",
-    "employee_name": "Employee Name",
-    "financial_year": "Tax Year",
-    "salary_month": "Month",
-    "tax_regime": "Tax Regime",
-    "pan_no": "PAN No.",
-    "date_of_joining": "Date of Joining",
-    "doj": "Date of Joining",
-    "date_of_exit": "Date of Exit",
-    "doe": "Date of Exit",
-    "dob": "DOB",
-    "gender": "Gender",
-    "designation": "Designation",
-    "department": "Department",
-    "branch": "Branch",
-    "annual_salary": "Annual Salary",
-    "monthly_salary": "Monthly Salary",
-    "basic_percent": "Basic %",
-    "upload_month": "Upload Month",
-    "tax_year": "Tax Year",
-    "status": "Status",
-    "gross_salary": "Gross Salary",
-    "basic": "Basic",
-    "hra": "HRA",
-    "sodexo_meal_passes": "Meal Passes / Sodexo",
-    "telephone_internet": "Telephone / Internet",
-    "electricity_reimbursement": "Electricity Reimbursement",
-    "professional_software": "Professional / Software",
-    "skill_development": "Skill Development",
-    "power_utility_allowance": "Power & Utility Allowance",
-    "taxable_allowance": "Taxable Allowance",
-    "ot_pli_profit_sharing": "OT / PLI / Profit Sharing",
-    "exgratia": "Ex-Gratia",
-    "gratuity": "Gratuity",
-    "severance": "Severance",
-    "leave_encashment": "Leave Encashment",
-    "referral_bonus": "Referral Bonus",
-    "other_adjustment": "Other Adjustment",
-    "total_income_from_salary": "Total Income from Salary",
-    "pli_amount": "PLI Amount",
-    "incentive_amount": "Incentive",
-    "performance_bonus": "Performance Bonus",
-    "profit_sharing": "Profit Sharing",
-    "other_variable_pay": "Other Variable Pay",
-    "total_variable_pay": "Total Variable Pay",
-    "remarks": "Remarks",
-    "tds_deducted": "TDS Deducted",
-    "tax1": "Tax1",
-    "tax2": "Tax2",
-    "tax3": "Tax3",
-    "tax4": "Tax4",
-    "tax5": "Tax5",
-    "uploaded_at": "Uploaded At",
-    "computed_at": "Computed At",
-    "email": "Email",
-}
-
-
-
-
-
-
-
-
-# =====================================================
-# TAX COMPUTATION ENGINE
-# Implements the 39-field tax computation per tax_cal.csv specification.
-# Pulls from: Employee Master • Salary Monthly • PLI Monthly • TDS Monthly
-# • Approved Employee Declarations.
-# =====================================================
-
-# Slabs as per the user's spec (Income Tax Act 2025, applicable from FY 2026-27)
-NEW_REGIME_SLABS = [
-    (400000, 0.00),    # Up to 4,00,000   — Nil
-    (800000, 0.05),    # 4,00,001 – 8,00,000   — 5%
-    (1200000, 0.10),   # 8,00,001 – 12,00,000  — 10%
-    (1600000, 0.15),   # 12,00,001 – 16,00,000 — 15%
-    (2000000, 0.20),   # 16,00,001 – 20,00,000 — 20%
-    (2400000, 0.25),   # 20,00,001 – 24,00,000 — 25%
-    (float("inf"), 0.30),  # Above 24,00,000      — 30%
-]
-
-OLD_REGIME_SLABS = [
-    (250000, 0.00),    # Up to 2,50,000 — Nil
-    (500000, 0.05),    # 2,50,001 – 5,00,000  — 5%
-    (1000000, 0.20),   # 5,00,001 – 10,00,000 — 20%
-    (float("inf"), 0.30),  # Above 10,00,000      — 30%
-]
-
-STD_DEDUCTION_NEW = 75000
-STD_DEDUCTION_OLD = 50000
-CESS_RATE = 0.04
 
 
 
@@ -2920,106 +2626,6 @@ def logout():
 
 
 
-# =====================================================
-# VOICE FEATURES REMOVED (per user request, May 2026)
-# Voice recording / TTS / speak buttons were taken out so Strides is
-# text-only. The helper below is kept as a stub so any lingering reference
-# (e.g., from cached session state) does not crash.
-# =====================================================
-
-def _voice_disabled_stub(*args, **kwargs):  # pragma: no cover - safety stub
-    return None
-
-
-def _unused_transcribe_audio_with_openai(audio_bytes):
-    if client is None:
-        return "", "OpenAI API key not available. Please add OPENAI_API_KEY in Streamlit Secrets."
-
-    try:
-        audio_file = io.BytesIO(audio_bytes)
-        audio_file.name = "sarika_voice_input.wav"
-
-        transcript = client.audio.transcriptions.create(
-            model="whisper-1",
-            file=audio_file,
-            language="en",
-            prompt=(
-                "Indian English speaker. Common terms: HRA, NPS, Section 80C, "
-                "Form 16, Form 12B, Form 12BB, Sodexo, Koenig, Stride, Strides, "
-                "SPOC, TDS, PAN, CTC, Rupees, lakh, crore."
-            ),
-        )
-
-        return transcript.text, ""
-
-    except Exception as e:
-        return "", str(e)
-
-
-def _unused_speak_button_html(text, button_label="🔊 Speak Reply"):
-    safe_text = html.escape(str(text)).replace("\\n", " ")
-
-    return f"""
-    <button onclick="
-        const msg = new SpeechSynthesisUtterance(`{safe_text}`);
-        msg.lang = 'en-IN';
-        msg.rate = 0.95;
-        msg.pitch = 1.02;
-        window.speechSynthesis.cancel();
-        window.speechSynthesis.speak(msg);
-    " style="
-        background:#155be8;
-        color:white;
-        border:none;
-        border-radius:10px;
-        padding:9px 14px;
-        font-weight:700;
-        cursor:pointer;
-        margin-top:6px;
-    ">
-        {button_label}
-    </button>
-    """
-
-
-def _unused_render_voice_sarika_panel():
-    st.markdown("### 🎙️ Voice Assistant")
-    st.caption("Record your question, then click **Transcribe & Ask Strides**.")
-
-    if client is None:
-        st.warning("Voice transcription needs OPENAI_API_KEY in Streamlit Secrets.")
-        st.info("Text chat will still work below.")
-        return
-
-    if not hasattr(st, "audio_input"):
-        st.error("Your Streamlit version does not support native audio recording.")
-        st.info("Please use Streamlit version 1.40.0 or later in requirements.txt.")
-        return
-
-    audio_file = st.audio_input(
-        "Record your question here",
-        key="sarika_native_audio_input"
-    )
-
-    if audio_file is not None:
-        audio_bytes = audio_file.getvalue()
-        st.audio(audio_bytes, format="audio/wav")
-
-        if st.button("📝 Transcribe & Ask Strides", use_container_width=True, key="voice_transcribe_ask_btn"):
-            with st.spinner("Strides is listening and thinking..."):
-                transcript, err = transcribe_audio_with_openai(audio_bytes)
-
-                if err:
-                    st.error(f"Voice transcription failed: {err}")
-                elif not transcript.strip():
-                    st.warning("No speech detected. Please try again.")
-                else:
-                    st.success(f"You said: {transcript}")
-                    submit_query(transcript.strip())
-                    st.rerun()
-
-    # Voice TTS removed — stub left intentionally empty.
-    return
 
 
 # =====================================================
@@ -3209,17 +2815,30 @@ def render_question_analytics():
                 mime="text/csv",
             )
         with c2:
-            if st.button("🗑️ Clear query log (irreversible)", key="qlog_clear"):
-                try:
-                    conn = sqlite3.connect(DB_PATH)
-                    cur = conn.cursor()
-                    cur.execute("DELETE FROM query_log")
-                    conn.commit()
-                    conn.close()
-                    st.success("Query log cleared.")
+            if not st.session_state.get("_confirm_clear_log"):
+                if st.button("🗑️ Clear query log…", key="qlog_clear"):
+                    st.session_state["_confirm_clear_log"] = True
                     st.rerun()
-                except Exception as e:
-                    st.error(f"Could not clear log: {e}")
+            else:
+                st.warning("⚠️ This will permanently delete all query log records. Are you sure?")
+                yes_col, no_col = st.columns(2)
+                with yes_col:
+                    if st.button("✅ Yes, delete all", key="qlog_clear_confirm", type="primary"):
+                        try:
+                            conn = sqlite3.connect(DB_PATH)
+                            cur = conn.cursor()
+                            cur.execute("DELETE FROM query_log")
+                            conn.commit()
+                            conn.close()
+                            st.session_state.pop("_confirm_clear_log", None)
+                            st.success("Query log cleared.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Could not clear log: {e}")
+                with no_col:
+                    if st.button("❌ Cancel", key="qlog_clear_cancel"):
+                        st.session_state.pop("_confirm_clear_log", None)
+                        st.rerun()
 
 
 # =====================================================
@@ -3713,7 +3332,7 @@ with top3:
     st.markdown(f"""
     <div class='user-pill'>
         👤 {st.session_state.employee_name}<br>
-        <span class='small-text'>Role: {st.session_state.role} · ID: {st.session_state.employee_id}</span>
+        <span class='small-text'>Role: {st.session_state.role}</span>
     </div>
     """, unsafe_allow_html=True)
     if st.button("Logout", use_container_width=True):
@@ -3913,7 +3532,7 @@ with right:
                         "Ask me anything about **Tax, Salary, Labour Code, Entity Nexus** or **SPOC routing**."
                     )
             else:
-                for item in st.session_state.chat_history[-30:]:
+                for item in st.session_state.chat_history[-50:]:
                     with st.chat_message("user", avatar="👤"):
                         st.markdown(item["query"])
 
