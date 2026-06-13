@@ -1,11 +1,13 @@
-name: Keep Strides Awake
+name: Keep Streamlit Alive
+
 on:
   schedule:
-    - cron: "*/10 * * * *"   # every 10 minutes
-  workflow_dispatch:           # manual trigger button
+    - cron: '*/5 * * * *'   # every 5 minutes
+  workflow_dispatch:         # manual trigger too
+
 jobs:
   ping:
     runs-on: ubuntu-latest
     steps:
-      - name: Ping Strides health endpoint
-        run: curl -sSf -m 30 "https://koenig-strides-wpn647aofdopamvcypcosu.streamlit.app/?ping=1" > /dev/null
+      - name: Ping Strides
+        run: curl -fsS "https://YOUR-STRIDES-URL/?ping=1" -o /dev/null
