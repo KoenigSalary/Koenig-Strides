@@ -9,6 +9,7 @@ import uuid
 from datetime import datetime
 import sqlite3
 import numpy as np
+import threading
 
 try:
     from sentence_transformers import SentenceTransformer
@@ -19,12 +20,55 @@ except Exception:
     AI_AVAILABLE = False
 
 # =====================================================
-# KOENIG STRIDES - POLISHED LOGIN UI + RESPONSIVE
+# DATABASE ABSTRACTION LAYER
+# Uses Postgres (Supabase) when DATABASE_URL is set in
+# st.secrets, otherwise falls back to local SQLite.
+# Add  DATABASE_URL = "postgresql://..."  in
+# Streamlit Cloud -> Settings -> Secrets to enable.
+# =====================================================
+
+try:
+    import psycopg2
+    import psycopg2.extras
+    _PSYCOPG2_AVAILABLE = True
+except ImportError:
+    _PSYCOPG2_AVAILABLE = False
+
+def _get_database_url():
+    try:
+        return st.secrets.get("DATABASE_URL", "") or ""
+    except Exception:
+        return ""
+
+def _using_postgres():
+    return _PSYCOPG2_AVAILABLE and bool(_get_database_url())
+
+def _placeholder(n=1):
+    """Return the right parameter placeholder for the active DB engine."""
+    if _using_postgres():
+        return ",".join(["%s"] * n) if n > 1 else "%s"
+    return ",".join(["?"] * n) if n > 1 else "?"
+
+def _sql(sqlite_sql):
+    """Translate common SQLite -> Postgres DDL differences."""
+    if not _using_postgres():
+        return sqlite_sql
+    sql = re.sub(r"INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY", sqlite_sql, flags=re.IGNORECASE)
+    return sql
+
+def _create_index_safe(cur, index_sql):
+    try:
+        cur.execute(index_sql)
+    except Exception:
+        pass
+
+# =====================================================
+# KOENIG STRIDE - POLISHED LOGIN UI + RESPONSIVE
 # Streamlit-native layout, no broken HTML wrappers
 # =====================================================
 
 st.set_page_config(
-    page_title="Koenig Strides",
+    page_title="Koenig Stride",
     page_icon="🤖",
     layout="wide",
     initial_sidebar_state="collapsed"
@@ -32,7 +76,7 @@ st.set_page_config(
 
 # =====================================================
 # RMS EMBED / SSO LAYER
-# Allows Koenig-Strides to be embedded inside RMS as an external app.
+# Allows Koenig-Stride to be embedded inside RMS as an external app.
 # Supports query params:
 #   ?embed=true                   → hide Streamlit chrome (header/footer/menu)
 #   ?panel=ask-strides            → deep-link to a specific panel after login
@@ -202,7 +246,7 @@ EXCEL_PATH = BASE_DIR / "knowledge" / "Koenig_VoiceBot_FAQ_Master.xlsx"
 LOGO_PATH = BASE_DIR / "assets" / "koenig_logo.png"
 SARIKA_PATH = BASE_DIR / "assets" / "sarika.png"
 USERS_PATH = BASE_DIR / "users.csv"
-DB_PATH = BASE_DIR / "koenig_strides.db"
+DB_PATH = BASE_DIR / "koenig_stride.db"
 
 
 DEFAULT_EMPLOYEE_PASSWORD = "Welcome@123"
@@ -843,31 +887,141 @@ def validate_password_strength(password):
         return False, "Password must include at least one special character."
     return True, ""
 
+# Thread lock for CSV writes (guards against concurrent Streamlit sessions
+# on the same process overwriting users.csv simultaneously).
+_users_lock = threading.Lock()
+
+_USERS_COLS = ["user_id", "password_hash", "role", "first_login", "active", "display_name"]
+
+def _ensure_users_table():
+    """Create the users table in the DB (Postgres or SQLite). Idempotent."""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(_sql("""
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT UNIQUE NOT NULL,
+                password_hash TEXT,
+                role TEXT,
+                first_login TEXT,
+                active TEXT,
+                display_name TEXT
+            )
+        """))
+        _create_index_safe(cur, "CREATE INDEX IF NOT EXISTS idx_users_user_id ON users(user_id)")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def init_users_file():
-    if not USERS_PATH.exists():
-        df = pd.DataFrame([{
-            "user_id": "admin",
-            "password_hash": hash_password(DEFAULT_ADMIN_PASSWORD),
-            "role": "Admin",
-            "first_login": "False",
-            "active": "True",
-            "display_name": "Admin"
-        }])
-        df.to_csv(USERS_PATH, index=False)
+    """Bootstrap: seed the admin account if no users exist yet (DB or CSV)."""
+    _ensure_users_table()
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        p = _placeholder()
+        cur.execute(f"SELECT COUNT(*) as cnt FROM users WHERE user_id = {p}", ("admin",))
+        row = cur.fetchone()
+        count = row["cnt"] if row else 0
+        if count == 0:
+            cur.execute(
+                f"INSERT INTO users (user_id, password_hash, role, first_login, active, display_name) "
+                f"VALUES ({_placeholder(6)})",
+                ("admin", hash_password(DEFAULT_ADMIN_PASSWORD), "Admin", "False", "True", "Admin")
+            )
+            conn.commit()
+        conn.close()
+        return  # DB seeded — skip CSV fallback
+    except Exception:
+        pass
+    # CSV fallback (local dev without DB)
+    with _users_lock:
+        if not USERS_PATH.exists():
+            df = pd.DataFrame([{
+                "user_id": "admin",
+                "password_hash": hash_password(DEFAULT_ADMIN_PASSWORD),
+                "role": "Admin",
+                "first_login": "False",
+                "active": "True",
+                "display_name": "Admin"
+            }])
+            df.to_csv(USERS_PATH, index=False)
 
 def load_users():
+    """Load all users as a DataFrame. Tries DB first, CSV fallback."""
     init_users_file()
-    df = pd.read_csv(USERS_PATH, dtype=str).fillna("")
-    for col in ["user_id", "password_hash", "role", "first_login", "active", "display_name"]:
+    try:
+        conn = get_db_connection()
+        df = pd.read_sql_query("SELECT * FROM users ORDER BY id", conn)
+        conn.close()
+        for col in _USERS_COLS:
+            if col not in df.columns:
+                df[col] = ""
+        return df.fillna("").astype(str)
+    except Exception:
+        pass
+    # CSV fallback
+    with _users_lock:
+        try:
+            df = pd.read_csv(USERS_PATH, dtype=str).fillna("")
+        except Exception:
+            df = pd.DataFrame(columns=_USERS_COLS)
+    for col in _USERS_COLS:
         if col not in df.columns:
             df[col] = ""
     return df
 
 def save_users(df):
-    for col in ["user_id", "password_hash", "role", "first_login", "active", "display_name"]:
+    """Persist the full users DataFrame. Tries DB first, CSV fallback."""
+    for col in _USERS_COLS:
         if col in df.columns:
             df[col] = df[col].astype(str)
-    df.to_csv(USERS_PATH, index=False)
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        p6 = _placeholder(6)
+        for _, row in df.iterrows():
+            uid = str(row.get("user_id", "")).strip()
+            if not uid:
+                continue
+            if _using_postgres():
+                cur.execute(
+                    f"""INSERT INTO users (user_id, password_hash, role, first_login, active, display_name)
+                         VALUES ({p6})
+                         ON CONFLICT (user_id) DO UPDATE SET
+                           password_hash = EXCLUDED.password_hash,
+                           role = EXCLUDED.role,
+                           first_login = EXCLUDED.first_login,
+                           active = EXCLUDED.active,
+                           display_name = EXCLUDED.display_name""",
+                    (uid, str(row.get("password_hash","")), str(row.get("role","")),
+                     str(row.get("first_login","")), str(row.get("active","")),
+                     str(row.get("display_name","")))
+                )
+            else:
+                cur.execute(
+                    """INSERT INTO users (user_id, password_hash, role, first_login, active, display_name)
+                         VALUES (?,?,?,?,?,?)
+                         ON CONFLICT(user_id) DO UPDATE SET
+                           password_hash=excluded.password_hash,
+                           role=excluded.role,
+                           first_login=excluded.first_login,
+                           active=excluded.active,
+                           display_name=excluded.display_name""",
+                    (uid, str(row.get("password_hash","")), str(row.get("role","")),
+                     str(row.get("first_login","")), str(row.get("active","")),
+                     str(row.get("display_name","")))
+                )
+        conn.commit()
+        conn.close()
+        return
+    except Exception:
+        pass
+    # CSV fallback with lock
+    with _users_lock:
+        df.to_csv(USERS_PATH, index=False)
 
 def bool_from_str(value):
     return str(value).strip().lower() in ["true", "1", "yes", "y"]
@@ -1159,12 +1313,12 @@ def login_screen():
         else:
             st.markdown("<div class='login-logo-wrap'><h2 style='color:#04123d;'>KOENIG</h2></div>", unsafe_allow_html=True)
 
-        # 2. Koenig Strides title (under logo, brand-colored)
+        # 2. Koenig Stride title (under logo, brand-colored)
         st.markdown("""
         <div class='login-stack'>
             <div class='login-title-row'>
                 <div class='login-title-icon'>☻</div>
-                <h1 class='login-title-text'>Koenig Strides</h1>
+                <h1 class='login-title-text'>Koenig Stride</h1>
             </div>
             <div class='login-subtitle'>Tax &amp; Entity Nexus Assistant — Step Forward</div>
         </div>
@@ -1173,7 +1327,7 @@ def login_screen():
         # 3. Welcome hero (under title)
         st.markdown("""
         <div class='login-hero-card'>
-            <h2>Welcome to Koenig Strides</h2>
+            <h2>Welcome to Koenig Stride</h2>
             <p>Your secure internal assistant for tax, salary, entity and SPOC guidance.</p>
         </div>
         """, unsafe_allow_html=True)
@@ -1187,29 +1341,54 @@ def login_screen():
         # is reachable only via the ?admin=true escape hatch and shows ONLY
         # the admin credentials form.
         st.caption("🔓 Admin access — employees should open Strides from RMS instead.")
-        user_id = st.text_input("Admin Username", value="admin")
-        password = st.text_input("Password", type="password")
-        if st.button("Admin Login", use_container_width=True, type="primary"):
-            ok, msg, row = authenticate_user(user_id, password)
-            if ok and row.get("role") == "Admin":
-                st.session_state.logged_in = True
-                st.session_state.role = "Admin"
-                st.session_state.employee_id = "admin"
-                st.session_state.employee_name = row.get("display_name", "Admin")
-                st.session_state.must_change_password = bool_from_str(row.get("first_login", "False"))
-                try:
-                    write_audit_log("LOGIN_SUCCESS", target_id="admin", details="role=Admin; via_admin_override")
-                except Exception:
-                    pass
-                st.rerun()
-            elif ok:
-                st.error("This is not an admin account.")
-            else:
-                try:
-                    write_audit_log("LOGIN_FAILED", target_id=str(user_id).strip(), details=f"role=Admin; reason={msg}")
-                except Exception:
-                    pass
-                st.error(msg)
+
+        # ---- Rate limiting: max 5 attempts, then 30-second cooldown ----
+        _now = datetime.now().timestamp()
+        _attempts = st.session_state.get("_login_attempts", 0)
+        _locked_until = st.session_state.get("_login_locked_until", 0)
+        _LOCKOUT_SECS = 30
+        _MAX_ATTEMPTS = 5
+
+        if _now < _locked_until:
+            _remaining = int(_locked_until - _now)
+            st.error(f"🔒 Too many failed attempts. Please wait {_remaining}s before trying again.")
+        else:
+            user_id = st.text_input("Admin Username", value="admin")
+            password = st.text_input("Password", type="password")
+            if _attempts >= _MAX_ATTEMPTS:
+                # Unlock if cooldown has elapsed
+                st.session_state["_login_attempts"] = 0
+
+            if st.button("Admin Login", use_container_width=True, type="primary"):
+                ok, msg, row = authenticate_user(user_id, password)
+                if ok and row.get("role") == "Admin":
+                    st.session_state["_login_attempts"] = 0
+                    st.session_state["_login_locked_until"] = 0
+                    st.session_state.logged_in = True
+                    st.session_state.role = "Admin"
+                    st.session_state.employee_id = "admin"
+                    st.session_state.employee_name = row.get("display_name", "Admin")
+                    st.session_state.must_change_password = bool_from_str(row.get("first_login", "False"))
+                    try:
+                        write_audit_log("LOGIN_SUCCESS", target_id="admin", details="role=Admin; via_admin_override")
+                    except Exception:
+                        pass
+                    st.rerun()
+                elif ok:
+                    st.error("This is not an admin account.")
+                else:
+                    _attempts += 1
+                    st.session_state["_login_attempts"] = _attempts
+                    if _attempts >= _MAX_ATTEMPTS:
+                        st.session_state["_login_locked_until"] = _now + _LOCKOUT_SECS
+                        st.error(f"🔒 {_MAX_ATTEMPTS} failed attempts — locked for {_LOCKOUT_SECS}s.")
+                    else:
+                        remaining_attempts = _MAX_ATTEMPTS - _attempts
+                        try:
+                            write_audit_log("LOGIN_FAILED", target_id=str(user_id).strip(), details=f"role=Admin; reason={msg}; attempt={_attempts}")
+                        except Exception:
+                            pass
+                        st.error(f"{msg} ({remaining_attempts} attempt{'s' if remaining_attempts != 1 else ''} remaining)")
 
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1251,10 +1430,10 @@ def _render_rms_only_gate():
     st.markdown(f"""
     <div class='rms-gate-wrap'>
       <div class='rms-gate-card'>
-        <div class='rms-gate-title'>🔐 Please open Koenig Strides from the RMS portal</div>
+        <div class='rms-gate-title'>🔐 Please open Koenig Stride from the RMS portal</div>
         <p class='rms-gate-sub'>
-          Koenig Strides uses your RMS identity — there's no separate login.<br>
-          Sign in to RMS and click the <b>Koenig Strides</b> tile.
+          Koenig Stride uses your RMS identity — there's no separate login.<br>
+          Sign in to RMS and click the <b>Koenig Stride</b> tile.
         </p>
         <a class='rms-gate-btn' href='{rms_url}' target='_blank'>Go to RMS Portal →</a>
       </div>
@@ -1270,7 +1449,7 @@ def force_password_change_screen():
     with c2:
         st.markdown("<div class='card'>", unsafe_allow_html=True)
         st.markdown("## 🔐 Change Password Required")
-        st.info("For security, please change your default password before using Koenig Strides.")
+        st.info("For security, please change your default password before using Koenig Stride.")
         new_password = st.text_input("New Password", type="password")
         confirm_password = st.text_input("Confirm New Password", type="password")
         if st.button("Update Password", use_container_width=True):
@@ -1499,6 +1678,34 @@ if not st.session_state.logged_in:
         _render_rms_only_gate()
     st.stop()
 
+# ---- JWT upgrade nag for admins ----------------------------------------
+# If an admin is logged in via plain email SSO (no JWT secret configured),
+# show a dismissible warning banner so they know to set RMS_SSO_SECRET.
+# Only shown to admins; employees never see it.
+if (
+    st.session_state.get("logged_in")
+    and st.session_state.get("role") == "Admin"
+    and not st.session_state.get("_jwt_nag_dismissed")
+):
+    _has_jwt_secret = False
+    try:
+        _has_jwt_secret = bool(st.secrets.get("RMS_SSO_SECRET", ""))
+    except Exception:
+        pass
+    if not _has_jwt_secret:
+        _nc1, _nc2 = st.columns([10, 1])
+        with _nc1:
+            st.warning(
+                "⚠️ **Security:** Plain-email SSO is active — anyone who knows a "
+                "colleague's email can impersonate them. Set `RMS_SSO_SECRET` in "
+                "Streamlit Secrets and have RMS issue signed JWT tokens to fix this. "
+                "See `RMS_INTEGRATION_GUIDE.md` for the spec."
+            )
+        with _nc2:
+            if st.button("✕", key="_jwt_nag_dismiss", help="Dismiss for this session"):
+                st.session_state["_jwt_nag_dismissed"] = True
+                st.rerun()
+
 if st.session_state.must_change_password:
     force_password_change_screen()
     st.stop()
@@ -1507,8 +1714,20 @@ if st.session_state.must_change_password:
 # KNOWLEDGE
 # =====================================================
 
+def _excel_mtime():
+    """Return the Excel file's modification timestamp (float).
+    Used as a cache-key so load_knowledge/load_spoc_master auto-invalidate
+    whenever the knowledge file is replaced on disk.
+    Returns 0.0 if the file is missing (consistent, cacheable value).
+    """
+    try:
+        return EXCEL_PATH.stat().st_mtime if EXCEL_PATH.exists() else 0.0
+    except Exception:
+        return 0.0
+
 @st.cache_data
-def load_knowledge():
+def load_knowledge(_mtime=None):
+    """_mtime is threaded through only to bust the cache when the file changes."""
     if not EXCEL_PATH.exists():
         return pd.DataFrame(), f"Knowledge file not found: {EXCEL_PATH}"
     try:
@@ -1526,7 +1745,7 @@ def load_knowledge():
         return pd.DataFrame(), str(e)
 
 @st.cache_data
-def load_spoc_master():
+def load_spoc_master(_mtime=None):
     """Load the SPOC Master sheet — used exclusively by the SPOC Routing module."""
     if not EXCEL_PATH.exists():
         return pd.DataFrame()
@@ -1543,8 +1762,9 @@ def load_spoc_master():
     except Exception:
         return pd.DataFrame()
 
-faq_df, load_error = load_knowledge()
-spoc_df = load_spoc_master()
+_kb_mtime = _excel_mtime()
+faq_df, load_error = load_knowledge(_mtime=_kb_mtime)
+spoc_df = load_spoc_master(_mtime=_kb_mtime)
 
 def safe_get(row, col, default=""):
     try:
@@ -1718,7 +1938,7 @@ def render_answer(row):
         email_html = f"<br><b>Email:</b> {email}" if email else ""
         st.markdown(f"<div class='protected-box'><b>🔒 Protected Information</b><br>This information is protected and cannot be displayed here.<br><br>Please contact the designated SPOC:<br><b>SPOC:</b> {spoc}{email_html}</div>", unsafe_allow_html=True)
     else:
-        st.markdown(f"<div class='answer-box'><b>Koenig Strides Answer:</b><br>{get_answer_text(row)}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='answer-box'><b>Koenig Stride Answer:</b><br>{get_answer_text(row)}</div>", unsafe_allow_html=True)
 
 # =====================================================
 # SEARCH
@@ -1762,12 +1982,13 @@ else:
     faq_df["combined_text"] = ""
 
 @st.cache_resource
-def create_embeddings(texts):
+def create_embeddings(texts, _mtime=None):
+    """_mtime busts the cache when the knowledge file changes."""
     if model is None or not texts:
         return np.array([])
     return model.encode(texts, show_progress_bar=False)
 
-embeddings = create_embeddings(faq_df["combined_text"].tolist()) if not faq_df.empty else np.array([])
+embeddings = create_embeddings(faq_df["combined_text"].tolist(), _mtime=_kb_mtime) if not faq_df.empty else np.array([])
 
 def semantic_search(query, top_k=3):
     if faq_df.empty:
@@ -1861,7 +2082,7 @@ Email: {safe_get(row, 'SPOC Email')}
             "question. Answer based on it directly.\n"
         )
 
-    prompt = f"""You are **Koenig Strides**, an internal assistant for Koenig Solutions employees
+    prompt = f"""You are **Koenig Stride**, an internal assistant for Koenig Solutions employees
 on Indian tax, payroll, HR, labour code, entity nexus and SPOC routing.
 
 STRICT RULES — follow without exception:
@@ -2058,13 +2279,37 @@ def _extract_amount_after(text, after_keywords):
     return _parse_amount_with_unit(m.group(1), m.group(2))
 
 
+# Deduction keywords that appear in the same sentence as a salary figure.
+# Amounts immediately after these are deduction values, not salary.
+_DEDUCTION_KW_FOR_STRIP = (
+    "80c", "80d", "80e", "80g", "hra", "nps", "pf", "ppf", "elss", "lic",
+    "home loan", "housing loan", "education loan", "lta", "sodexo",
+    "meal pass", "donation", "mediclaim", "80ccd",
+)
+
+def _strip_deduction_amounts(text):
+    """Return a copy of text with amounts that clearly belong to deduction
+    clauses blanked out so they don't get misidentified as salary figures.
+    e.g. 'salary 20L, 80C 1.5L' -> 'salary 20L, 80C XXXXX'
+    """
+    t = text.lower()
+    for kw in _DEDUCTION_KW_FOR_STRIP:
+        kw_re = re.escape(kw)
+        # Blank out a number that appears within 40 chars AFTER the keyword
+        pat = (r"(?<![a-z0-9])" + kw_re + r"(?![a-z0-9])"
+               r"([^\d]{0,40})(\d[\d,]*\.?\d*)"
+               r"(\s*(?:lakh|lakhs|lac|lacs|crore|crores|cr|l|k|thousand))?")
+        t = re.sub(pat, lambda m: m.group(0)[:m.start(2)-m.start()] + "XXXXX", t, flags=re.IGNORECASE)
+    return t
+
 def _extract_salary(text):
     """Detect the primary salary figure mentioned in `text`.
 
     Heuristics, in priority order:
-      1. Number immediately after 'salary' / 'income' / 'CTC' / 'gross' / 'package' / 'earn'.
-      2. The LARGEST standalone amount in the sentence (ignoring small numbers <₹1L,
-         which are almost always deduction figures, not salary).
+      1. Number immediately after a salary keyword ('salary', 'ctc', 'gross'…).
+      2. Largest standalone amount after deduction amounts are blanked out —
+         prevents '80C 1.5 lakh' from being picked as the salary when the
+         user writes 'if salary is 12L and 80C is 1.5L'.
 
     Returns the rupee value, or None if no plausible salary found.
     """
@@ -2076,11 +2321,12 @@ def _extract_salary(text):
         if v and v >= 100000:    # at least ₹1L to be a plausible annual salary
             return v
 
-    # Priority 2: largest standalone amount
+    # Priority 2: largest amount after stripping deduction figures
+    cleaned = _strip_deduction_amounts(text)
     candidates = []
     for m in re.finditer(
         r"(?<![\d.])(\d[\d,]*\.?\d*)\s*(lakh|lakhs|lac|lacs|crore|crores|cr|l|k|thousand)?",
-        text, re.IGNORECASE,
+        cleaned, re.IGNORECASE,
     ):
         v = _parse_amount_with_unit(m.group(1), m.group(2))
         if v and v >= 100000:
@@ -2470,11 +2716,6 @@ def submit_query(query):
 # =====================================================
 # PAYROLL + TAX DATABASE FOUNDATION
 # =====================================================
-
-def get_db_connection():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
 
 
 
@@ -3286,7 +3527,7 @@ def render_admin_analytics_dashboard():
             st.download_button(
                 "⬇️ Download full audit log (.csv)",
                 audit_df.to_csv(index=False).encode("utf-8"),
-                file_name="koenig_strides_audit_log.csv",
+                file_name="koenig_stride_audit_log.csv",
                 mime="text/csv",
                 use_container_width=True,
             )
@@ -3325,7 +3566,7 @@ with top2:
     st.markdown("""
     <div class='brand-row'>
         <div class='bot-icon'>☻</div>
-        <h1 class='brand-title'>Koenig Strides</h1>
+        <h1 class='brand-title'>Koenig Stride</h1>
     </div>
     <div class='brand-subtitle'>Tax & Entity Nexus Assistant — Step Forward</div>
     """, unsafe_allow_html=True)
@@ -3395,7 +3636,7 @@ with right:
     if selected_panel == "Home":
         st.markdown("""
         <div class='hero' style='margin-top:24px;'>
-            <h2>Welcome to Koenig Strides</h2>
+            <h2>Welcome to Koenig Stride</h2>
             <p>Select a panel from the left sidebar,<br>or use Ask Strides to ask directly.</p>
         </div>
         """, unsafe_allow_html=True)
@@ -3529,7 +3770,7 @@ with right:
                 with st.chat_message("assistant", avatar="👩‍💼"):
                     st.markdown(
                         f"Hi **{st.session_state.employee_name}** 👋  \n"
-                        "I'm **Strides**, your Koenig Strides assistant. "
+                        "I'm **Strides**, your Koenig Stride assistant. "
                         "Ask me anything about **Tax, Salary, Labour Code, Entity Nexus** or **SPOC routing**."
                     )
             else:
@@ -3608,12 +3849,21 @@ with right:
 
     elif selected_panel == "Knowledge Base" and st.session_state.role == "Admin":
         st.markdown("## 📚 Knowledge Base")
+        kb_col1, kb_col2 = st.columns([3, 1])
+        with kb_col2:
+            if st.button("🔄 Reload from Excel", use_container_width=True, help="Clears the cache and re-reads the Excel file from disk"):
+                load_knowledge.clear()
+                load_spoc_master.clear()
+                create_embeddings.clear()
+                st.success("Cache cleared — reloading…")
+                st.rerun()
         if not faq_df.empty:
-            st.success(f"Knowledge base loaded successfully. Total records: {len(faq_df)}")
+            with kb_col1:
+                st.success(f"Knowledge base loaded. {len(faq_df)} FAQ records · {len(spoc_df)} SPOC rows · file mtime: {datetime.fromtimestamp(_kb_mtime).strftime('%d %b %Y %H:%M') if _kb_mtime else 'unknown'}")
             cols = [c for c in ["Main Module", "Source", "Category", "Question", "Protected", "SPOC Name", "SPOC Email"] if c in faq_df.columns]
             st.dataframe(faq_df[cols], use_container_width=True)
         else:
-            st.warning("No knowledge records loaded.")
+            st.warning("No knowledge records loaded. Check that the Excel file exists and has 'Salary & Tax FAQs' or 'Entity Nexus FAQs' sheets.")
 
     elif selected_panel == "Question Analytics" and st.session_state.role == "Admin":
         render_question_analytics()

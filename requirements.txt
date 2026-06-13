@@ -7,3 +7,4 @@ sentence-transformers
 numpy
 scikit-learn
 bcrypt
+psycopg2-binary
