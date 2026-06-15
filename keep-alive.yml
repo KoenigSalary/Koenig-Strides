@@ -1,13 +1,13 @@
-name: Keep Streamlit Alive
+name: Keep Streamlit App Awake
 
 on:
   schedule:
-    - cron: '*/5 * * * *'   # every 5 minutes
-  workflow_dispatch:         # manual trigger too
+    - cron: "*/20 * * * *"
+  workflow_dispatch:
 
 jobs:
-  ping:
+  keep-alive:
     runs-on: ubuntu-latest
     steps:
-      - name: Ping Strides
-        run: curl -fsS "https://YOUR-STRIDES-URL/?ping=1" -o /dev/null
+      - name: Ping Streamlit app
+        run: curl -L --fail https://YOUR-APP-NAME.streamlit.app
