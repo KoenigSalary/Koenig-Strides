@@ -10,7 +10,6 @@ from datetime import datetime
 import sqlite3
 import numpy as np
 import threading
-import psycopg2
 
 try:
     from sentence_transformers import SentenceTransformer
@@ -28,33 +27,12 @@ except Exception:
 # Streamlit Cloud -> Settings -> Secrets to enable.
 # =====================================================
 
-def test_supabase_connection():
-    try:
-        import psycopg2
-        db_url = st.secrets.get("DATABASE_URL", "")
-        if not db_url:
-            st.error("DATABASE_URL not found in secrets")
-            return
-
-        conn = psycopg2.connect(db_url, connect_timeout=5, sslmode="require")
-        cur = conn.cursor()
-        cur.execute("select current_database(), current_user, now();")
-        row = cur.fetchone()
-        cur.close()
-        conn.close()
-
-        st.success("✅ Supabase connection successful")
-        st.write("Database:", row[0])
-        st.write("User:", row[1])
-        st.write("Server time:", row[2])
-
-    except Exception as e:
-        st.error(f"❌ Supabase connection failed: {e}")
-
-if st.session_state.get("role") == "Admin":
-    with st.expander("Supabase Connection Test"):
-        if st.button("Run Supabase Test"):
-            test_supabase_connection()
+try:
+    import psycopg2
+    import psycopg2.extras
+    _PSYCOPG2_AVAILABLE = True
+except ImportError:
+    _PSYCOPG2_AVAILABLE = False
 
 def _get_database_url():
     try:
