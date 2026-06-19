@@ -28,31 +28,25 @@ except Exception:
 # Streamlit Cloud -> Settings -> Secrets to enable.
 # =====================================================
 
-try:
-    import psycopg2
-    import psycopg2.extras
-    _PSYCOPG2_AVAILABLE = True
-except ImportError:
-    _PSYCOPG2_AVAILABLE = False
-
 def test_supabase_connection():
-    db_url = st.secrets.get("DATABASE_URL", "")
-    if not db_url:
-        st.error("DATABASE_URL not found in Streamlit secrets")
-        return
-
     try:
+        import psycopg2
+        db_url = st.secrets.get("DATABASE_URL", "")
+        if not db_url:
+            st.error("DATABASE_URL not found in secrets")
+            return
+
         conn = psycopg2.connect(db_url, connect_timeout=5, sslmode="require")
         cur = conn.cursor()
         cur.execute("select current_database(), current_user, now();")
-        db_name, db_user, db_time = cur.fetchone()
+        row = cur.fetchone()
         cur.close()
         conn.close()
 
         st.success("✅ Supabase connection successful")
-        st.write("Database:", db_name)
-        st.write("User:", db_user)
-        st.write("Server time:", db_time)
+        st.write("Database:", row[0])
+        st.write("User:", row[1])
+        st.write("Server time:", row[2])
 
     except Exception as e:
         st.error(f"❌ Supabase connection failed: {e}")
