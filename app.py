@@ -10,6 +10,7 @@ from datetime import datetime
 import sqlite3
 import numpy as np
 import threading
+import psycopg2
 
 try:
     from sentence_transformers import SentenceTransformer
@@ -33,6 +34,64 @@ try:
     _PSYCOPG2_AVAILABLE = True
 except ImportError:
     _PSYCOPG2_AVAILABLE = False
+
+def test_supabase_connection():
+    db_url = st.secrets.get("DATABASE_URL", "")
+    if not db_url:
+        st.error("DATABASE_URL not found in Streamlit secrets")
+        return
+
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5, sslmode="require")
+        cur = conn.cursor()
+        cur.execute("select current_database(), current_user, now();")
+        db_name, db_user, db_time = cur.fetchone()
+        cur.close()
+        conn.close()
+
+        st.success("✅ Supabase connection successful")
+        st.write("Database:", db_name)
+        st.write("User:", db_user)
+        st.write("Server time:", db_time)
+
+    except Exception as e:
+        st.error(f"❌ Supabase connection failed: {e}")
+
+if st.session_state.get("role") == "Admin":
+    with st.expander("Supabase Connection Test"):
+        if st.button("Run Supabase Test"):
+            test_supabase_connection()
+
+def test_supabase_read_write():
+    db_url = st.secrets.get("DATABASE_URL", "")
+    if not db_url:
+        st.error("DATABASE_URL not found in Streamlit secrets")
+        return
+
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5, sslmode="require")
+        cur = conn.cursor()
+
+        cur.execute("""
+            create table if not exists app_healthcheck (
+                id serial primary key,
+                created_at timestamptz default now()
+            )
+        """)
+        conn.commit()
+
+        cur.execute("insert into app_healthcheck default values returning id, created_at;")
+        row = cur.fetchone()
+        conn.commit()
+
+        st.success("✅ Supabase read/write successful")
+        st.write("Inserted row:", row)
+
+        cur.close()
+        conn.close()
+
+    except Exception as e:
+        st.error(f"❌ Supabase read/write failed: {e}")
 
 def _get_database_url():
     try:
