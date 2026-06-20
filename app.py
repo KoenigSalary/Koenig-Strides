@@ -3616,6 +3616,106 @@ with left:
             panel_button("📊 Question Analytics", "Question Analytics")
             panel_button("📈 Admin Analytics", "Admin Analytics")
 
+    # ---- Admin Mode toggle (sidebar bottom) ------------------------------
+    # Allows an SSO'd Employee to elevate to Admin within the SAME session
+    # by entering a separate admin password — without logging out of RMS.
+    # On success: session role flips Employee → Admin (employee_id preserved).
+    # Audit-logged. Rate-limited (5 attempts → 30s cooldown).
+    st.markdown("---")
+    if st.session_state.role == "Admin" and st.session_state.get("_admin_mode_elevated"):
+        # Currently elevated via Admin Mode — show "Exit Admin Mode" button.
+        if st.button("👤 Exit Admin Mode", use_container_width=True, key="exit_admin_mode_btn"):
+            _orig_role = st.session_state.get("_admin_mode_prev_role", "Employee")
+            st.session_state.role = _orig_role
+            st.session_state["_admin_mode_elevated"] = False
+            st.session_state["_admin_mode_prev_role"] = None
+            st.session_state["_show_admin_mode_form"] = False
+            # If currently in an admin-only panel, drop back to Home.
+            if st.session_state.get("selected_panel") in (
+                "User Management", "Knowledge Base", "Question Analytics", "Admin Analytics"
+            ):
+                st.session_state.selected_panel = "Home"
+            try:
+                write_audit_log("ADMIN_MODE_DISABLED",
+                                target_id=str(st.session_state.get("employee_id", "")),
+                                details=f"reverted_to={_orig_role}")
+            except Exception:
+                pass
+            st.rerun()
+    elif st.session_state.role != "Admin":
+        # Employee — show subtle "Admin Mode" button + inline password form.
+        if not st.session_state.get("_show_admin_mode_form"):
+            if st.button("🔐 Admin Mode", use_container_width=True, key="open_admin_mode_btn"):
+                st.session_state["_show_admin_mode_form"] = True
+                st.rerun()
+        else:
+            with st.container(border=True):
+                st.markdown("##### 🔐 Enter Admin Mode")
+                st.caption("Elevates your session to Admin without logging out of RMS.")
+
+                _now_ts = datetime.now().timestamp()
+                _att = st.session_state.get("_admin_mode_attempts", 0)
+                _lock_until = st.session_state.get("_admin_mode_locked_until", 0)
+                _LOCK_SECS = 30
+                _MAX = 5
+
+                if _now_ts < _lock_until:
+                    _remaining = int(_lock_until - _now_ts)
+                    st.error(f"🔒 Too many attempts. Wait {_remaining}s.")
+                else:
+                    _entered_pw = st.text_input(
+                        "Admin password", type="password",
+                        key="_admin_mode_pw_input",
+                    )
+                    c1, c2 = st.columns(2)
+                    if c1.button("Unlock", use_container_width=True, key="admin_mode_unlock_btn", type="primary"):
+                        # Read expected password from secrets (preferred) or fallback default.
+                        try:
+                            _expected = st.secrets.get("STRIDES_ADMIN_MODE_PASSWORD", "")
+                        except Exception:
+                            _expected = ""
+                        if not _expected:
+                            # Fallback default — documented; user is expected to override via secret.
+                            _expected = "KoenigStrides@2026Admin"
+
+                        if _entered_pw and _entered_pw == _expected:
+                            # SUCCESS — flip role to Admin, preserve everything else.
+                            st.session_state["_admin_mode_prev_role"] = st.session_state.role or "Employee"
+                            st.session_state.role = "Admin"
+                            st.session_state["_admin_mode_elevated"] = True
+                            st.session_state["_admin_mode_attempts"] = 0
+                            st.session_state["_admin_mode_locked_until"] = 0
+                            st.session_state["_show_admin_mode_form"] = False
+                            try:
+                                write_audit_log(
+                                    "ADMIN_MODE_ENABLED",
+                                    target_id=str(st.session_state.get("employee_id", "")),
+                                    details="in_session_elevation",
+                                )
+                            except Exception:
+                                pass
+                            st.success("✅ Admin mode unlocked.")
+                            st.rerun()
+                        else:
+                            _att += 1
+                            st.session_state["_admin_mode_attempts"] = _att
+                            if _att >= _MAX:
+                                st.session_state["_admin_mode_locked_until"] = _now_ts + _LOCK_SECS
+                                st.error(f"🔒 {_MAX} failed attempts — locked for {_LOCK_SECS}s.")
+                            else:
+                                try:
+                                    write_audit_log(
+                                        "ADMIN_MODE_FAILED",
+                                        target_id=str(st.session_state.get("employee_id", "")),
+                                        details=f"attempt={_att}",
+                                    )
+                                except Exception:
+                                    pass
+                                st.error(f"Incorrect password ({_MAX - _att} attempts left)")
+                    if c2.button("Cancel", use_container_width=True, key="admin_mode_cancel_btn"):
+                        st.session_state["_show_admin_mode_form"] = False
+                        st.rerun()
+
 with right:
     selected_panel = st.session_state.get("selected_panel", "Home")
 
