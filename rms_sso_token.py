@@ -7,9 +7,9 @@ Usage (command line):
         --email "praveen.chaudhary@koenig-solutions.com" \
         --name "Praveen Chaudhary" --role Admin \
         --base-url https://strides.example.com \
-        --panel ask-strides --expires-in 300
+        --panel employee-declaration --expires-in 300
 
-It prints a ready-to-use URL the RMS dashboard tile should open.
+It prints a ready-to-use URL the RMS dashboard tile should open. For the updated tax journey, a declaration-oriented deep link such as `employee-declaration` may be used.
 
 Works with stdlib only — no PyJWT dependency required.
 

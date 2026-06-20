@@ -13,13 +13,12 @@ public function is called, never at import time.
 
 Phase A scope (current ship):
     - Tax Regime selection + lock + one-time change request
-    - Investment Declaration (Old Regime only)
-    - Proof Submission (PDF/JPG/PNG, max 5MB)
-    - My Declaration report + CSV export
+    - Form 12BB / 124 Investment Declaration (Old Regime only)
+    - My Declaration report + Submit & Lock with certification
     - Admin: Review Queue, Regime Change Requests, Compliance Reports
 
 Phase B (next ship):
-    - Monthly Allowances (Telephone, Electricity, Professional, etc.)
+    - Monthly Allowances (Telephone, Electricity, Professional, Software)
 """
 
 from __future__ import annotations
@@ -38,7 +37,7 @@ import streamlit as st
 # CONFIG
 # =====================================================
 
-CURRENT_FY = "FY 2026-27"
+CURRENT_FY = "Tax Year 2026-27"
 
 # 5 MB cap; PDFs and common images only.
 MAX_PROOF_SIZE_BYTES = 5 * 1024 * 1024
@@ -57,11 +56,23 @@ PAN_REGEX = re.compile(r"^[A-Z]{5}[0-9]{4}[A-Z]$")
 # TAX RULES MASTER (from tax_rules.py — embedded for self-containment)
 # =====================================================
 
+FORM_TITLE = "Form 12BB / 124 — Investment Declaration Form"
+FORM_SUBTITLE = (
+    "Statement showing particulars of claims by an employee for deduction of tax "
+    "under section 392(5)(b) of the Income-tax Act, 2025 read with Rule 205 of the "
+    "Income-tax Rules, 2026."
+)
+DECLARATION_DISCLAIMER = (
+    "Non-submission or incorrect submission of documents for Form 12BB / 124 within "
+    "the stipulated timeline may lead to disallowance of claimed deductions."
+)
+PROOF_SUBMISSION_VISIBLE = False
+
 SECTION_MASTER: List[Dict[str, Any]] = [
     {
         "section_code": "80C",
-        "display_name": "Section 80C",
-        "group_name": "Chapter VI-A",
+        "display_name": "Section 123 (Earlier 80C) — Specified savings / investments",
+        "group_name": "Chapter VIII-A / Schedule XV",
         "items": [
             "Life Insurance Premium", "PPF", "EPF", "ELSS", "Tuition Fees",
             "Tax Saver FD", "NSC", "Sukanya Samriddhi", "Home Loan Principal",
@@ -71,16 +82,16 @@ SECTION_MASTER: List[Dict[str, Any]] = [
     },
     {
         "section_code": "80CCD(1B)",
-        "display_name": "Section 80CCD(1B)",
-        "group_name": "Chapter VI-A",
+        "display_name": "Section 124 (Earlier 80CCD(1B)) — Additional NPS contribution",
+        "group_name": "Chapter VIII-A / Pension deduction",
         "items": ["NPS Additional Contribution"],
         "amount_cap": 50000,
         "expected_proof": "NPS contribution statement / transaction receipt",
     },
     {
         "section_code": "80D",
-        "display_name": "Section 80D",
-        "group_name": "Chapter VI-A",
+        "display_name": "Section 126 (Earlier 80D) — Health insurance / preventive health check-up",
+        "group_name": "Chapter VIII-A",
         "items": [
             "Medical Insurance - Self / Spouse / Children",
             "Medical Insurance - Parents",
@@ -91,64 +102,64 @@ SECTION_MASTER: List[Dict[str, Any]] = [
     },
     {
         "section_code": "80DD",
-        "display_name": "Section 80DD",
-        "group_name": "Chapter VI-A",
-        "items": ["Maintenance including medical treatment of dependent with disability"],
+        "display_name": "Section 127 (Earlier 80DD) — Maintenance of dependant with disability",
+        "group_name": "Chapter VIII-A",
+        "items": ["Maintenance including medical treatment of dependant with disability"],
         "amount_cap": None,
         "expected_proof": "Disability certificate and payment proof",
     },
     {
         "section_code": "80DDB",
-        "display_name": "Section 80DDB",
-        "group_name": "Chapter VI-A",
+        "display_name": "Section 128 (Earlier 80DDB) — Specified disease / ailment",
+        "group_name": "Chapter VIII-A",
         "items": ["Medical treatment for specified disease / ailment"],
         "amount_cap": None,
         "expected_proof": "Specialist certificate and payment proof",
     },
     {
         "section_code": "80E",
-        "display_name": "Section 80E",
-        "group_name": "Chapter VI-A",
+        "display_name": "Section 129 (Earlier 80E) — Interest on higher education loan",
+        "group_name": "Chapter VIII-A",
         "items": ["Education Loan Interest"],
         "amount_cap": None,
         "expected_proof": "Interest certificate from lender",
     },
     {
         "section_code": "80G",
-        "display_name": "Section 80G",
-        "group_name": "Chapter VI-A",
+        "display_name": "Section 133 (Earlier 80G) — Eligible donations",
+        "group_name": "Chapter VIII-A",
         "items": ["Eligible donation"],
         "amount_cap": None,
         "expected_proof": "Donation receipt with donee PAN / registration details",
     },
     {
         "section_code": "24(b)",
-        "display_name": "Section 24(b)",
-        "group_name": "House Property",
-        "items": ["Home Loan Interest"],
+        "display_name": "Section 22(1)(b) (Earlier 24(b)) — Interest on home loan",
+        "group_name": "Income from House Property",
+        "items": ["Interest on home loan"],
         "amount_cap": None,
         "expected_proof": "Home loan interest certificate",
     },
     {
         "section_code": "HRA",
-        "display_name": "House Rent Allowance",
-        "group_name": "Salary Allowances",
+        "display_name": "Form No. 124 — House Rent Allowance",
+        "group_name": "Form No. 124 allowances",
         "items": ["House Rent Allowance"],
         "amount_cap": None,
         "expected_proof": "Rent receipts / rent agreement / landlord PAN where applicable",
     },
     {
         "section_code": "CHILD_EDU",
-        "display_name": "Children Education Allowance",
-        "group_name": "Salary Allowances",
+        "display_name": "Form No. 124 — Children Declaration / Children Education Allowance",
+        "group_name": "Form No. 124 allowances",
         "items": ["Children Education Allowance"],
         "amount_cap": None,
         "expected_proof": "School fee receipt",
     },
     {
         "section_code": "OTHER_VIA",
-        "display_name": "Other Chapter VI-A",
-        "group_name": "Chapter VI-A",
+        "display_name": "Other eligible Chapter VIII-A deduction (specify section)",
+        "group_name": "Chapter VIII-A",
         "items": ["Other eligible deduction"],
         "amount_cap": None,
         "expected_proof": "Applicable proof as per section",
@@ -159,8 +170,16 @@ SECTION_LOOKUP = {row["section_code"]: row for row in SECTION_MASTER}
 SECTION_CODES = [row["section_code"] for row in SECTION_MASTER]
 
 CLAIMANT_OPTIONS = ["Self", "Self + Family", "Parents", "Spouse", "Children", "Dependent"]
+CLAIMANT_OPTIONS_80E = ["Self", "Spouse", "Children"]
 RELATION_OPTIONS = ["Self", "Father", "Mother", "Spouse", "Son", "Daughter", "Brother", "Sister", "Other"]
 LANDLORD_RELATIONS = ["Unrelated", "Father", "Mother", "Spouse", "Brother", "Sister", "Other Relative"]
+PROPERTY_OCCUPANCY_OPTIONS = ["Self Occupied", "Rented"]
+
+
+
+
+# =====================================================
+# DATABASE LAYER
 
 
 # =====================================================
@@ -231,6 +250,40 @@ def _row_to_dict(cur) -> Optional[Dict[str, Any]]:
 
 def _now() -> str:
     return dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _table_columns(conn, table_name: str) -> set[str]:
+    cur = conn.cursor()
+    try:
+        if _is_pg():
+            cur.execute(
+                "SELECT column_name FROM information_schema.columns WHERE table_name=%s",
+                (table_name,),
+            )
+            return {row[0] for row in cur.fetchall()}
+        cur.execute(f"PRAGMA table_info({table_name})")
+        return {row[1] for row in cur.fetchall()}
+    finally:
+        cur.close()
+
+
+def _ensure_columns(conn, table_name: str, columns: Dict[str, str]) -> None:
+    existing = _table_columns(conn, table_name)
+    cur = conn.cursor()
+    try:
+        for column_name, column_type in columns.items():
+            if column_name not in existing:
+                cur.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
+        conn.commit()
+    finally:
+        cur.close()
+
+
+def _declaration_locked(header: Optional[Dict[str, Any]]) -> bool:
+    if not header:
+        return False
+    return str(header.get("status") or "").upper() == "DECLARATION_LOCKED" or \
+        str(header.get("workflow_stage") or "").upper() == "DECLARATION_LOCKED"
 
 
 # =====================================================
@@ -379,6 +432,11 @@ def ensure_schema() -> None:
                 updated_on {ts}
             )
         """)
+        _ensure_columns(conn, "compliance_declaration_header", {
+            "declaration_verified": "INTEGER DEFAULT 0",
+            "declaration_verification_name": "TEXT",
+            "declaration_parent_name": "TEXT"
+        })
         conn.commit()
         _INIT_DONE = True
     finally:
@@ -500,6 +558,8 @@ def add_declaration_item(employee_id: str, payload: Dict[str, Any]) -> None:
     header = get_or_create_header(employee_id)
     if header.get("tax_regime") != "Old Regime":
         raise ValueError("Investment declaration is allowed only under Old Regime.")
+    if _declaration_locked(header):
+        raise ValueError("Declaration is already submitted and locked.")
 
     conn = _get_conn()
     cur = conn.cursor()
@@ -623,21 +683,48 @@ def list_declaration_items(employee_id: str) -> List[Dict[str, Any]]:
             ORDER BY di.id DESC""",
             (employee_id, CURRENT_FY),
         )
-        return _rows_to_dicts(cur)
+        rows = _rows_to_dicts(cur)
     finally:
         cur.close()
         conn.close()
 
+    for row in rows:
+        row["section_label"] = _section_display(row.get("section_code", ""))
+        try:
+            row["metadata"] = json.loads(row.get("metadata_json") or "{}")
+        except Exception:
+            row["metadata"] = {}
+        meta = row.get("metadata") or {}
+        if row.get("section_code") == "24(b)":
+            row["lender_name"] = meta.get("lender_name", "")
+            row["lender_pan"] = meta.get("lender_pan", "")
+            row["lender_address"] = meta.get("lender_address", "")
+            row["property_occupancy"] = meta.get("property_occupancy", "")
+        if row.get("section_code") == "CHILD_EDU":
+            row["school_name"] = meta.get("school_name", "")
+    return rows
 
-def submit_declaration(employee_id: str) -> None:
+
+def submit_declaration(employee_id: str, verification_name: str, parent_name: str,
+                       declaration_confirmed: bool = False) -> None:
     header = get_or_create_header(employee_id)
     items = list_declaration_items(employee_id)
+    if header.get("tax_regime") != "Old Regime":
+        raise ValueError("Form 12BB / 124 declaration is required only for Old Regime employees.")
+    if _declaration_locked(header):
+        raise ValueError("Declaration is already submitted and locked.")
     if not items:
         raise ValueError("Add at least one declaration item before submitting.")
+    if not (verification_name or "").strip():
+        raise ValueError("Employee name is required for certification.")
+    if not (parent_name or "").strip():
+        raise ValueError("Parent name is required for certification.")
+    if not declaration_confirmed:
+        raise ValueError("Please accept the certification before submitting and locking the declaration.")
+
     conn = _get_conn()
     cur = conn.cursor()
     try:
-        # Move DRAFT / RESUBMITTED items to SUBMITTED state.
         cur.execute(
             f"""UPDATE compliance_declaration_items
                 SET status = CASE
@@ -649,15 +736,23 @@ def submit_declaration(employee_id: str) -> None:
         )
         cur.execute(
             f"UPDATE compliance_declaration_header "
-            f"SET workflow_stage='PROOF_WAIT', status='DECLARATION_SUBMITTED', updated_on={_ph()} "
+            f"SET workflow_stage='DECLARATION_LOCKED', status='DECLARATION_LOCKED', "
+            f"declaration_verified=1, declaration_verification_name={_ph()}, "
+            f"declaration_parent_name={_ph()}, submitted_on={_ph()}, locked_on={_ph()}, updated_on={_ph()} "
             f"WHERE id={_ph()}",
-            (_now(), header["id"]),
+            (verification_name.strip(), parent_name.strip(), _now(), _now(), _now(), header["id"]),
         )
         conn.commit()
     finally:
         cur.close()
         conn.close()
-    _audit(employee_id, "SUBMIT_DECLARATION", "header", str(header["id"]), f"items={len(items)}")
+    _audit(
+        employee_id,
+        "SUBMIT_DECLARATION",
+        "header",
+        str(header["id"]),
+        f"items={len(items)}; verified_by={verification_name.strip()}; parent={parent_name.strip()}"
+    )
 
 
 # =====================================================
@@ -1077,33 +1172,84 @@ def validate_declaration_payload(payload: Dict[str, Any]) -> List[str]:
     section = payload.get("section_code", "")
     if section not in SECTION_LOOKUP:
         errors.append("Invalid section code.")
-    declared = payload.get("declared_amount", 0)
+
     try:
-        declared = float(declared)
+        declared = float(payload.get("declared_amount") or 0)
         if declared <= 0:
             errors.append("Declared amount must be greater than zero.")
         if not float(declared).is_integer():
             errors.append("Declared amount should be a whole number.")
     except Exception:
         errors.append("Declared amount must be numeric.")
+        declared = 0
+
+    cfg = SECTION_LOOKUP.get(section)
+    if cfg and cfg.get("amount_cap") and declared > float(cfg["amount_cap"]):
+        errors.append(f"Declared amount exceeds the limit of ₹{int(cfg['amount_cap']):,}.")
+
+    meta = payload.get("metadata") or {}
 
     if section == "HRA":
-        if not payload.get("landlord_name"):
+        if not (payload.get("landlord_name") or "").strip():
             errors.append("Landlord name is mandatory for HRA.")
-        if not payload.get("rental_property_address"):
+        if not (payload.get("landlord_relation") or "").strip():
+            errors.append("Landlord relation is mandatory for HRA.")
+        if not (payload.get("rental_property_address") or "").strip():
             errors.append("Rental property address is mandatory for HRA.")
-        rent = float(payload.get("annual_rent") or 0)
+        try:
+            annual_rent = float(payload.get("annual_rent") or 0)
+        except Exception:
+            annual_rent = 0
+        if annual_rent <= 0:
+            errors.append("Annual rent paid must be greater than zero.")
         pan = (payload.get("landlord_pan") or "").strip().upper()
-        if rent > 100000 and not pan:
+        if annual_rent > 100000 and not pan:
             errors.append("Landlord PAN required when annual rent > ₹1,00,000.")
         if pan and not PAN_REGEX.match(pan):
             errors.append("Landlord PAN format is invalid (e.g., AAAPL1234C).")
-    if section == "80DDB" and not payload.get("disease_name"):
-        errors.append("Disease name is mandatory for 80DDB.")
+
     if section == "80D" and not payload.get("claimant_for"):
-        errors.append("Claimant type is mandatory for 80D.")
-    if section == "CHILD_EDU" and int(payload.get("children_count") or 0) <= 0:
-        errors.append("Children count must be at least 1 for CEA.")
+        errors.append("Claimant type is mandatory for Section 126 (Earlier 80D).")
+
+    if section == "80E":
+        claimant = payload.get("claimant_for") or ""
+        if claimant not in CLAIMANT_OPTIONS_80E:
+            errors.append("Section 129 (Earlier 80E) can be claimed only for Self, Spouse, or Children.")
+
+    if section == "80DD" and not payload.get("relation_to_employee"):
+        errors.append("Relation to employee is mandatory for Section 127 (Earlier 80DD).")
+
+    if section == "80DDB":
+        if not payload.get("relation_to_employee"):
+            errors.append("Relation to employee is mandatory for Section 128 (Earlier 80DDB).")
+        if not (payload.get("disease_name") or "").strip():
+            errors.append("Disease name is mandatory for Section 128 (Earlier 80DDB).")
+
+    if section == "24(b)":
+        lender_name = (meta.get("lender_name") or "").strip()
+        lender_pan = (meta.get("lender_pan") or "").strip().upper()
+        lender_address = (meta.get("lender_address") or "").strip()
+        property_occupancy = (meta.get("property_occupancy") or "").strip()
+        if not lender_name:
+            errors.append("Name of lender is mandatory for Interest on home loan.")
+        if not lender_pan:
+            errors.append("PAN of lender is mandatory for Interest on home loan.")
+        elif not PAN_REGEX.match(lender_pan):
+            errors.append("Lender PAN format is invalid (e.g., AAAPL1234C).")
+        if not lender_address:
+            errors.append("Address of lender is mandatory for Interest on home loan.")
+        if property_occupancy not in PROPERTY_OCCUPANCY_OPTIONS:
+            errors.append("Select whether the property is Self Occupied or Rented.")
+
+    if section == "CHILD_EDU":
+        if int(payload.get("children_count") or 0) <= 0:
+            errors.append("Eligible children count must be at least 1 for Children Declaration.")
+        if not (meta.get("school_name") or "").strip():
+            errors.append("School / institution name is mandatory for Children Declaration.")
+
+    if section == "OTHER_VIA" and not (meta.get("section_reference") or "").strip():
+        errors.append("Section reference is mandatory for other eligible deductions.")
+
     return errors
 
 
@@ -1118,107 +1264,247 @@ def _money(value) -> str:
         return "₹ 0"
 
 
+def _required_label(label: str) -> str:
+    return f"{label} *"
+
+
+def _safe_key(text_value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]+", "_", text_value).strip("_") or "field"
+
+
+def _section_display(section_code: str) -> str:
+    row = SECTION_LOOKUP.get(section_code)
+    return row["display_name"] if row else section_code
+
+
 def _section_options() -> List[str]:
-    return [f"{row['section_code']} | {row['display_name']}" for row in SECTION_MASTER]
+    return [row["display_name"] for row in SECTION_MASTER]
 
 
 def _parse_section(selected: str) -> str:
-    return selected.split("|", 1)[0].strip()
+    for row in SECTION_MASTER:
+        if row["display_name"] == selected:
+            return row["section_code"]
+    for row in SECTION_MASTER:
+        fallback = f"{row['section_code']} | {row['display_name']}"
+        if selected == fallback:
+            return row["section_code"]
+    return "80C"
 
 
-def _render_item_form(prefix: str, defaults: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    defaults = defaults or {}
+def _state_val(key: str, default: Any = None) -> Any:
+    return st.session_state.get(key, default)
+
+
+def _form_step_state(prefix: str, section_code: str) -> Dict[str, int]:
+    nav_key = f"nav_step_{prefix}"
+    sec_key = f"nav_section_{prefix}"
+    last_section = st.session_state.get(sec_key)
+    if last_section != section_code:
+        st.session_state[sec_key] = section_code
+        if last_section is not None:
+            st.session_state[nav_key] = 1
+    max_step = 3 if section_code in {"HRA", "24(b)", "80D", "80DD", "80DDB", "80E", "CHILD_EDU", "OTHER_VIA"} else 2
+    step = int(st.session_state.get(nav_key, 1) or 1)
+    if step < 1 or step > max_step:
+        step = 1
+        st.session_state[nav_key] = step
+    return {"step": step, "max_step": max_step}
+
+
+def _set_form_step(prefix: str, step: int) -> None:
+    st.session_state[f"nav_step_{prefix}"] = max(1, int(step))
+
+
+def _render_item_form(prefix: str, defaults: Optional[Dict[str, Any]] = None) -> Tuple[Dict[str, Any], Dict[str, int]]:
+    defaults = dict(defaults or {})
+    if defaults.get("metadata_json") and not defaults.get("metadata"):
+        try:
+            defaults["metadata"] = json.loads(defaults.get("metadata_json") or "{}")
+        except Exception:
+            defaults["metadata"] = {}
+    meta_defaults = defaults.get("metadata") or {}
+
     options = _section_options()
     default_code = defaults.get("section_code", "80C")
-    default_idx = SECTION_CODES.index(default_code) if default_code in SECTION_CODES else 0
-    selected = st.selectbox("Section / Claim type", options, index=default_idx, key=f"sec_{prefix}")
+    default_label = _section_display(default_code)
+    default_idx = options.index(default_label) if default_label in options else 0
+    selected = st.selectbox(_required_label("Section / Claim type"), options, index=default_idx, key=f"sec_{prefix}")
     section_code = _parse_section(selected)
     cfg = SECTION_LOOKUP[section_code]
+    nav = _form_step_state(prefix, section_code)
+    st.caption(f"Step {nav['step']} of {nav['max_step']} • {cfg['display_name']}")
+
+    item_key = f"item_{prefix}_{_safe_key(section_code)}"
+    amt_key = f"amt_{prefix}"
+    proof_key = f"proof_{prefix}"
+    remarks_key = f"rem_{prefix}"
+    claimant_key = f"claim_{prefix}"
+    relation_key = f"rel_{prefix}"
+    disease_key = f"dis_{prefix}"
+    landlord_name_key = f"lname_{prefix}"
+    landlord_relation_key = f"lrel_{prefix}"
+    landlord_pan_key = f"lpan_{prefix}"
+    landlord_address_key = f"laddr_{prefix}"
+    monthly_rent_key = f"mrent_{prefix}"
+    kids_key = f"kids_{prefix}"
+    school_key = f"school_{prefix}"
+    other_section_key = f"other_sec_{prefix}"
+    lender_name_key = f"lender_name_{prefix}"
+    lender_pan_key = f"lender_pan_{prefix}"
+    lender_address_key = f"lender_addr_{prefix}"
+    property_occ_key = f"prop_occ_{prefix}"
 
     items = cfg["items"]
     default_item = defaults.get("item_name", items[0]) if defaults.get("item_name") in items else items[0]
-    c1, c2, c3 = st.columns(3)
-    item_name = c1.selectbox("Item", items, index=items.index(default_item), key=f"item_{prefix}")
-    declared = c2.number_input(
-        "Declared amount (₹)", min_value=0, step=1,
-        value=int(defaults.get("declared_amount") or 0), key=f"amt_{prefix}",
-    )
-    expected = c3.text_input(
-        "Expected proof", value=defaults.get("expected_proof") or cfg["expected_proof"],
-        key=f"proof_{prefix}",
-    )
-    remarks = st.text_area("Remarks", value=defaults.get("remarks", ""), key=f"rem_{prefix}")
+
+    if nav["step"] == 1:
+        c1, c2 = st.columns(2)
+        c1.selectbox(_required_label("Item"), items, index=items.index(default_item), key=item_key)
+        c2.number_input(
+            _required_label("Declared amount (₹)"), min_value=0, step=1,
+            value=int(defaults.get("declared_amount") or 0), key=amt_key,
+        )
+        if section_code == "CHILD_EDU":
+            st.info("Children declaration reminder: if you are claiming Children Education Allowance, please fill the eligible children count and school / institution name in the next step.")
+
+    if nav["step"] == 2:
+        extra_rendered = False
+        if section_code in ("80D", "80DD", "80DDB", "80E"):
+            opts = [""] + (CLAIMANT_OPTIONS_80E if section_code == "80E" else CLAIMANT_OPTIONS)
+            cur = defaults.get("claimant_for", "")
+            st.selectbox(
+                _required_label("Claiming for"), opts,
+                index=opts.index(cur) if cur in opts else 0, key=claimant_key,
+            )
+            extra_rendered = True
+        if section_code in ("80DD", "80DDB"):
+            opts = [""] + RELATION_OPTIONS
+            cur = defaults.get("relation_to_employee", "")
+            st.selectbox(
+                _required_label("Relation to employee"), opts,
+                index=opts.index(cur) if cur in opts else 0, key=relation_key,
+            )
+            extra_rendered = True
+        if section_code == "80DDB":
+            st.text_input(
+                _required_label("Disease name"), value=defaults.get("disease_name", ""), key=disease_key,
+            )
+            extra_rendered = True
+        if section_code == "HRA":
+            c1, c2 = st.columns(2)
+            c1.text_input(_required_label("Landlord name"), value=defaults.get("landlord_name", ""), key=landlord_name_key)
+            cur_rel = defaults.get("landlord_relation", LANDLORD_RELATIONS[0])
+            c2.selectbox(
+                _required_label("Landlord relation"), LANDLORD_RELATIONS,
+                index=LANDLORD_RELATIONS.index(cur_rel) if cur_rel in LANDLORD_RELATIONS else 0,
+                key=landlord_relation_key,
+            )
+            st.text_input(
+                "Landlord PAN (mandatory if annual rent exceeds ₹1,00,000)",
+                value=(defaults.get("landlord_pan") or "").upper(), key=landlord_pan_key,
+            )
+            st.text_area(
+                _required_label("Rental property address"),
+                value=defaults.get("rental_property_address", ""), key=landlord_address_key,
+            )
+            default_monthly_rent = int(meta_defaults.get("monthly_rent") or ((defaults.get("annual_rent") or 0) / 12 if defaults.get("annual_rent") else 0))
+            st.number_input(
+                _required_label("Monthly rent (₹)"), min_value=0, step=1,
+                value=default_monthly_rent, key=monthly_rent_key,
+            )
+            monthly_rent = int(_state_val(monthly_rent_key, default_monthly_rent) or 0)
+            st.metric("Annual rent paid (auto-calculated)", _money(monthly_rent * 12))
+            extra_rendered = True
+        if section_code == "24(b)":
+            c1, c2 = st.columns(2)
+            c1.text_input(_required_label("Name of lender"), value=meta_defaults.get("lender_name", ""), key=lender_name_key)
+            c2.text_input(_required_label("PAN of lender"), value=(meta_defaults.get("lender_pan", "") or "").upper(), key=lender_pan_key)
+            st.text_area(_required_label("Address of lender"), value=meta_defaults.get("lender_address", ""), key=lender_address_key)
+            current_occupancy = meta_defaults.get("property_occupancy", PROPERTY_OCCUPANCY_OPTIONS[0])
+            st.selectbox(
+                _required_label("Property is self occupied or rented"), PROPERTY_OCCUPANCY_OPTIONS,
+                index=PROPERTY_OCCUPANCY_OPTIONS.index(current_occupancy) if current_occupancy in PROPERTY_OCCUPANCY_OPTIONS else 0,
+                key=property_occ_key,
+            )
+            extra_rendered = True
+        if section_code == "CHILD_EDU":
+            st.number_input(
+                _required_label("Eligible children count"), min_value=0, max_value=4, step=1,
+                value=int(defaults.get("children_count") or 0), key=kids_key,
+            )
+            st.text_input(
+                _required_label("School / institution name"), value=meta_defaults.get("school_name", ""), key=school_key,
+            )
+            extra_rendered = True
+        if section_code == "OTHER_VIA":
+            st.text_input(
+                _required_label("Section reference"), value=meta_defaults.get("section_reference", ""), key=other_section_key,
+                placeholder="Example: Section 131 / relevant Chapter VIII-A clause",
+            )
+            extra_rendered = True
+        if not extra_rendered:
+            st.info("No additional claim-specific fields for this section. Use Next to review proof details.")
+
+    if nav["step"] == nav["max_step"]:
+        st.text_input(
+            _required_label("Expected proof"),
+            value=defaults.get("expected_proof") or cfg["expected_proof"], key=proof_key,
+        )
+        if section_code != "24(b)":
+            st.text_area("Remarks", value=defaults.get("remarks", ""), key=remarks_key)
+        else:
+            st.info("Remarks are not required for Interest on home loan in this release.")
 
     payload: Dict[str, Any] = {
         "section_code": section_code,
         "section_group": cfg["group_name"],
-        "item_name": item_name,
-        "declared_amount": declared,
-        "expected_proof": expected,
-        "remarks": remarks,
+        "item_name": _state_val(item_key, default_item),
+        "declared_amount": int(_state_val(amt_key, defaults.get("declared_amount") or 0) or 0),
+        "expected_proof": _state_val(proof_key, defaults.get("expected_proof") or cfg["expected_proof"]),
+        "remarks": "" if section_code == "24(b)" else _state_val(remarks_key, defaults.get("remarks", "")),
+        "claimant_for": _state_val(claimant_key, defaults.get("claimant_for", "")),
+        "relation_to_employee": _state_val(relation_key, defaults.get("relation_to_employee", "")),
+        "disease_name": _state_val(disease_key, defaults.get("disease_name", "")),
+        "landlord_name": _state_val(landlord_name_key, defaults.get("landlord_name", "")),
+        "landlord_pan": str(_state_val(landlord_pan_key, defaults.get("landlord_pan", "")) or "").upper(),
+        "landlord_relation": _state_val(landlord_relation_key, defaults.get("landlord_relation", "")),
+        "rental_property_address": _state_val(landlord_address_key, defaults.get("rental_property_address", "")),
+        "annual_rent": float(defaults.get("annual_rent") or 0),
+        "children_count": int(_state_val(kids_key, defaults.get("children_count") or 0) or 0),
+        "metadata": {},
     }
 
-    if section_code in ("80D", "80DD", "80DDB", "80E", "24(b)", "CHILD_EDU"):
-        opts = [""] + CLAIMANT_OPTIONS
-        cur = defaults.get("claimant_for", "")
-        payload["claimant_for"] = st.selectbox(
-            "Claiming for", opts,
-            index=opts.index(cur) if cur in opts else 0, key=f"claim_{prefix}",
-        )
-
-    if section_code in ("80DD", "80DDB"):
-        opts = [""] + RELATION_OPTIONS
-        cur = defaults.get("relation_to_employee", "")
-        payload["relation_to_employee"] = st.selectbox(
-            "Relation", opts,
-            index=opts.index(cur) if cur in opts else 0, key=f"rel_{prefix}",
-        )
-
-    if section_code == "80DDB":
-        payload["disease_name"] = st.text_input(
-            "Disease name", value=defaults.get("disease_name", ""), key=f"dis_{prefix}",
-        )
+    if payload["item_name"] not in items:
+        payload["item_name"] = items[0]
 
     if section_code == "HRA":
-        c1, c2 = st.columns(2)
-        payload["landlord_name"] = c1.text_input(
-            "Landlord name", value=defaults.get("landlord_name", ""), key=f"lname_{prefix}",
-        )
-        rel_options = LANDLORD_RELATIONS
-        cur_rel = defaults.get("landlord_relation", LANDLORD_RELATIONS[0])
-        payload["landlord_relation"] = c2.selectbox(
-            "Landlord relation", rel_options,
-            index=rel_options.index(cur_rel) if cur_rel in rel_options else 0,
-            key=f"lrel_{prefix}",
-        )
-        payload["landlord_pan"] = st.text_input(
-            "Landlord PAN (mandatory if rent > ₹1L)",
-            value=defaults.get("landlord_pan", ""), key=f"lpan_{prefix}",
-        )
-        payload["rental_property_address"] = st.text_area(
-            "Rental property address",
-            value=defaults.get("rental_property_address", ""), key=f"laddr_{prefix}",
-        )
-        payload["annual_rent"] = st.number_input(
-            "Annual rent paid (₹)", min_value=0, step=1,
-            value=int(defaults.get("annual_rent") or defaults.get("declared_amount") or 0),
-            key=f"rent_{prefix}",
-        )
+        monthly_rent = int(_state_val(monthly_rent_key, meta_defaults.get("monthly_rent") or 0) or 0)
+        payload["annual_rent"] = float(monthly_rent * 12)
+        payload["metadata"]["monthly_rent"] = monthly_rent
+    else:
+        payload["annual_rent"] = float(defaults.get("annual_rent") or 0)
 
+    if section_code == "24(b)":
+        payload["metadata"].update({
+            "lender_name": _state_val(lender_name_key, meta_defaults.get("lender_name", "")),
+            "lender_pan": str(_state_val(lender_pan_key, meta_defaults.get("lender_pan", "")) or "").upper(),
+            "lender_address": _state_val(lender_address_key, meta_defaults.get("lender_address", "")),
+            "property_occupancy": _state_val(property_occ_key, meta_defaults.get("property_occupancy", PROPERTY_OCCUPANCY_OPTIONS[0])),
+        })
     if section_code == "CHILD_EDU":
-        payload["children_count"] = st.number_input(
-            "Eligible children", min_value=0, max_value=4, step=1,
-            value=int(defaults.get("children_count") or 0), key=f"kids_{prefix}",
-        )
+        payload["metadata"]["school_name"] = _state_val(school_key, meta_defaults.get("school_name", ""))
+    if section_code == "OTHER_VIA":
+        payload["metadata"]["section_reference"] = _state_val(other_section_key, meta_defaults.get("section_reference", ""))
 
-    return payload
+    return payload, nav
 
 
 def render_tax_regime_panel(employee_id: str) -> None:
     ensure_schema()
     header = get_or_create_header(employee_id)
     st.markdown("## 📋 Tax Regime Selection")
-    st.caption(f"Financial Year: **{CURRENT_FY}** • Employee: **{employee_id}**")
+    st.caption(f"Tax Year: **{CURRENT_FY}** • Employee: **{employee_id}**")
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Current Regime", header.get("tax_regime") or "Not selected")
@@ -1262,13 +1548,13 @@ def render_tax_regime_panel(employee_id: str) -> None:
     if header.get("is_locked"):
         with st.container(border=True):
             st.markdown("#### 🔄 One-time Regime Change Request")
-            st.caption("Allowed once per financial year, subject to admin approval.")
+            st.caption("Allowed once per tax year, subject to admin approval.")
             current = header.get("tax_regime") or ""
             other = "New Regime" if current == "Old Regime" else "Old Regime"
             reason = st.text_area("Reason for change", placeholder="Explain why you'd like to switch...")
             already_used = int(header.get("regime_change_used") or 0) >= 1
             if already_used:
-                st.warning("⚠️ One-time regime change already used for this FY.")
+                st.warning("⚠️ One-time regime change already used for this tax year.")
             if st.button(f"Request change to {other}", disabled=already_used):
                 if not reason.strip():
                     st.error("Please provide a reason.")
@@ -1284,51 +1570,83 @@ def render_tax_regime_panel(employee_id: str) -> None:
 def render_investment_declaration_panel(employee_id: str) -> None:
     ensure_schema()
     header = get_or_create_header(employee_id)
-    st.markdown("## 🧾 Investment Declaration")
+    locked = _declaration_locked(header)
+    st.markdown(f"## 🧾 {FORM_TITLE}")
+    st.caption(FORM_SUBTITLE)
+    st.warning(DECLARATION_DISCLAIMER)
 
     if header.get("tax_regime") != "Old Regime":
         st.warning(
-            "Investment declaration is available only for **Old Regime** employees. "
+            "Form 12BB / 124 declaration is available only for **Old Regime** employees. "
             "Visit the **Tax Regime** panel first to select Old Regime."
         )
         return
 
+    if locked:
+        st.success("Declaration is already submitted and locked. Review the summary in **My Declaration**.")
+
+    st.info(
+        "Children declaration highlight: if you want to claim **Children Education Allowance**, "
+        "please add the dedicated **Form No. 124 — Children Declaration / Children Education Allowance** item and complete the children count + school details."
+    )
+
     add_tab, manage_tab = st.tabs(["➕ Add Item", "✏️ Manage / Resubmit"])
 
     with add_tab:
-        with st.form("add_decl_form"):
-            payload = _render_item_form("add")
-            if st.form_submit_button("Add declaration item", type="primary", use_container_width=True):
-                errors = validate_declaration_payload(payload)
-                if errors:
-                    for err in errors:
-                        st.error(err)
-                else:
-                    try:
-                        add_declaration_item(employee_id, payload)
-                        st.success("Item added.")
-                        st.rerun()
-                    except Exception as exc:
-                        st.error(str(exc))
+        if locked:
+            st.info("Add item is disabled because the declaration has already been submitted and locked.")
+        else:
+            with st.form("add_decl_form"):
+                payload, nav = _render_item_form("add")
+                c1, c2, c3 = st.columns(3)
+                back_clicked = c1.form_submit_button("◀ Back", use_container_width=True, disabled=nav["step"] == 1)
+                next_clicked = c2.form_submit_button("Next ▶", use_container_width=True, disabled=nav["step"] == nav["max_step"])
+                add_clicked = c3.form_submit_button("Add declaration item", type="primary", use_container_width=True)
+                if back_clicked:
+                    _set_form_step("add", nav["step"] - 1)
+                    st.rerun()
+                elif next_clicked:
+                    _set_form_step("add", nav["step"] + 1)
+                    st.rerun()
+                elif add_clicked:
+                    errors = validate_declaration_payload(payload)
+                    if errors:
+                        for err in errors:
+                            st.error(err)
+                    else:
+                        try:
+                            add_declaration_item(employee_id, payload)
+                            _set_form_step("add", 1)
+                            st.success("Declaration item added.")
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(str(exc))
 
     items = list_declaration_items(employee_id)
 
     with manage_tab:
         editable_statuses = {"DRAFT", "RESUBMISSION_REQUIRED", "REJECTED", "RESUBMITTED"}
         editable = [x for x in items if x.get("status") in editable_statuses]
-        if not editable:
+        if locked:
+            st.info("Manage / Resubmit is disabled because the declaration has been submitted and locked.")
+        elif not editable:
             st.info("No editable items right now.")
         for item in editable:
-            with st.expander(f"#{item['id']} • {item['section_code']} • {item['item_name']} "
-                             f"• {_money(item.get('declared_amount'))} • {item.get('status')}"):
+            with st.expander(f"#{item['id']} • {item.get('section_label') or item['section_code']} • {item['item_name']} • {_money(item.get('declared_amount'))} • {item.get('status')}"):
                 with st.form(f"edit_decl_{item['id']}"):
-                    payload = _render_item_form(f"edit_{item['id']}", item)
-                    c1, c2 = st.columns(2)
-                    save_clicked = c1.form_submit_button("💾 Update item", type="primary",
-                                                          use_container_width=True)
-                    del_clicked = c2.form_submit_button("🗑️ Delete item",
-                                                         use_container_width=True)
-                    if save_clicked:
+                    payload, nav = _render_item_form(f"edit_{item['id']}", item)
+                    c1, c2, c3, c4 = st.columns(4)
+                    back_clicked = c1.form_submit_button("◀ Back", use_container_width=True, disabled=nav["step"] == 1)
+                    next_clicked = c2.form_submit_button("Next ▶", use_container_width=True, disabled=nav["step"] == nav["max_step"])
+                    save_clicked = c3.form_submit_button("💾 Update item", type="primary", use_container_width=True)
+                    del_clicked = c4.form_submit_button("🗑️ Delete item", use_container_width=True)
+                    if back_clicked:
+                        _set_form_step(f"edit_{item['id']}", nav["step"] - 1)
+                        st.rerun()
+                    elif next_clicked:
+                        _set_form_step(f"edit_{item['id']}", nav["step"] + 1)
+                        st.rerun()
+                    elif save_clicked:
                         errors = validate_declaration_payload(payload)
                         if errors:
                             for err in errors:
@@ -1336,121 +1654,62 @@ def render_investment_declaration_panel(employee_id: str) -> None:
                         else:
                             try:
                                 update_declaration_item(item["id"], employee_id, payload)
-                                st.success("Item updated.")
+                                st.success("Declaration item updated.")
                                 st.rerun()
                             except Exception as exc:
                                 st.error(str(exc))
-                    if del_clicked:
+                    elif del_clicked:
                         try:
                             delete_declaration_item(item["id"], employee_id)
-                            st.success("Item deleted.")
+                            st.success("Declaration item deleted.")
                             st.rerun()
                         except Exception as exc:
                             st.error(str(exc))
 
     if items:
         st.markdown("---")
-        st.subheader("📋 Current declaration register")
+        st.subheader("📋 Current Form 12BB / 124 declaration register")
         df = pd.DataFrame(items)
         display_cols = [c for c in [
-            "id", "section_group", "section_code", "item_name", "declared_amount",
-            "actual_amount", "approved_amount", "status", "proof_count", "reviewer_remarks",
+            "id", "section_label", "section_code", "item_name", "declared_amount",
+            "children_count", "actual_amount", "approved_amount", "status", "proof_count", "reviewer_remarks",
         ] if c in df.columns]
         st.dataframe(df[display_cols], use_container_width=True, hide_index=True)
         total = float(pd.to_numeric(df["declared_amount"], errors="coerce").fillna(0).sum())
         c1, c2 = st.columns(2)
         c1.metric("Total declared", _money(total))
-        if c2.button("✅ Submit final declaration", type="primary", use_container_width=True):
-            try:
-                submit_declaration(employee_id)
-                st.success("Declaration submitted. Upload proofs in the Proof Submission panel.")
-                st.rerun()
-            except Exception as exc:
-                st.error(str(exc))
+        c2.info("Go to **My Declaration** to certify and use **Submit & Lock Declaration**.")
     else:
         st.info("No declaration items yet. Add one above to get started.")
 
 
 def render_proof_submission_panel(employee_id: str) -> None:
-    ensure_schema()
-    header = get_or_create_header(employee_id)
     st.markdown("## 📎 Proof Submission")
-
-    if header.get("tax_regime") != "Old Regime":
-        st.warning("Proof submission is only required for Old Regime employees.")
+    if not PROOF_SUBMISSION_VISIBLE:
+        st.info("Proof Submission is intentionally hidden for now in this release. Backend support is retained for future activation.")
         return
-
-    items = list_declaration_items(employee_id)
-    if not items:
-        st.info("No declaration items found. Add items in the **Investment Declaration** panel first.")
-        return
-
-    allowed = {"SUBMITTED", "RESUBMITTED", "RESUBMISSION_REQUIRED", "UNDER REVIEW",
-               "REJECTED", "PROOF_SUBMITTED"}
-    for item in items:
-        with st.container(border=True):
-            st.markdown(f"### {item['section_code']} • {item['item_name']}")
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Declared", _money(item.get("declared_amount")))
-            c2.metric("Actual", _money(item.get("actual_amount")))
-            c3.metric("Proofs", int(item.get("proof_count") or 0))
-            c4.metric("Status", item.get("status") or "DRAFT")
-            st.caption(f"Expected: {item.get('expected_proof') or '-'}")
-            if item.get("reviewer_remarks"):
-                st.warning(f"Reviewer remarks: {item.get('reviewer_remarks')}")
-
-            if item.get("status") in allowed:
-                actual = st.number_input(
-                    f"Actual amount (₹)", min_value=0, step=1,
-                    value=int(item.get("actual_amount") or item.get("declared_amount") or 0),
-                    key=f"act_{item['id']}",
-                )
-                files = st.file_uploader(
-                    "Upload proof (PDF / JPG / PNG, max 5MB each)",
-                    type=["pdf", "jpg", "jpeg", "png"],
-                    accept_multiple_files=True,
-                    key=f"up_{item['id']}",
-                )
-                if st.button(f"💾 Save proof for item #{item['id']}", key=f"save_p_{item['id']}"):
-                    if not files:
-                        st.error("Please choose at least one file.")
-                    else:
-                        had_error = False
-                        for f in files:
-                            try:
-                                save_proof(item["id"], employee_id, actual, f)
-                            except Exception as exc:
-                                st.error(f"{f.name}: {exc}")
-                                had_error = True
-                        if not had_error:
-                            st.success(f"Uploaded {len(files)} file(s).")
-                            st.rerun()
-            else:
-                st.info("Not currently open for proof upload.")
-
-            existing = list_proofs_for_item(item["id"])
-            if existing:
-                st.caption(f"📁 {len(existing)} proof(s) on record:")
-                for p in existing:
-                    size_kb = (p.get("file_size") or 0) // 1024
-                    st.markdown(f"  • {p.get('file_name')} ({size_kb} KB) — uploaded {p.get('uploaded_on')}")
 
 
 def render_my_declaration_panel(employee_id: str) -> None:
     ensure_schema()
     header = get_or_create_header(employee_id)
     items = list_declaration_items(employee_id)
-    st.markdown("## 📊 My Declaration")
-    c1, c2, c3 = st.columns(3)
+    locked = _declaration_locked(header)
+    st.markdown(f"## 📊 My Declaration — {FORM_TITLE}")
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("Regime", header.get("tax_regime") or "Not selected")
     c2.metric("Items", len(items))
     c3.metric("Stage", header.get("workflow_stage") or "REGIME_SELECTION")
+    c4.metric("Locked", "Yes" if locked else "No")
+
+    if not any((item.get("section_code") == "CHILD_EDU") for item in items):
+        st.info("Reminder: add the Children Declaration item if you need to claim Children Education Allowance for Tax Year 2026-27.")
 
     if items:
         df = pd.DataFrame(items)
         display_cols = [c for c in [
-            "id", "section_code", "item_name", "declared_amount", "actual_amount",
-            "approved_amount", "status", "proof_count", "reviewer_remarks",
+            "id", "section_label", "section_code", "item_name", "declared_amount", "children_count",
+            "actual_amount", "approved_amount", "status", "proof_count", "reviewer_remarks",
         ] if c in df.columns]
         st.dataframe(df[display_cols], use_container_width=True, hide_index=True)
         csv = df.to_csv(index=False).encode("utf-8")
@@ -1462,6 +1721,44 @@ def render_my_declaration_panel(employee_id: str) -> None:
         )
     else:
         st.info("No declarations yet.")
+
+    if header.get("tax_regime") == "Old Regime":
+        with st.container(border=True):
+            st.markdown("### ✅ Submit & Lock Declaration")
+            st.caption("Complete this certification before locking your Form 12BB / 124 declaration.")
+            verification_name = st.text_input(
+                _required_label("Employee name"),
+                value=header.get("declaration_verification_name") or st.session_state.get("employee_name", ""),
+                key="decl_verification_name",
+                disabled=locked,
+            )
+            parent_name = st.text_input(
+                _required_label("Father / Mother name"),
+                value=header.get("declaration_parent_name") or "",
+                key="decl_parent_name",
+                disabled=locked,
+            )
+            st.markdown(
+                f"**Certification:** Please certify in the given format only. "
+                f"I, **{verification_name or '..............'}**, son/daughter of **{parent_name or '......................'}**, "
+                f"do hereby certify that the information given in the form is complete and correct."
+            )
+            declaration_ok = st.checkbox(
+                "I confirm the above declaration and want to submit & lock Form 12BB / 124.",
+                key="decl_verify_tick",
+                disabled=locked,
+            )
+            if locked:
+                st.success(
+                    f"Declaration locked on {header.get('locked_on') or '-'} for {header.get('declaration_verification_name') or verification_name}."
+                )
+            elif st.button("🔒 Submit & Lock Declaration", type="primary", use_container_width=True, disabled=not items):
+                try:
+                    submit_declaration(employee_id, verification_name, parent_name, declaration_ok)
+                    st.success("Declaration submitted and locked successfully.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(str(exc))
 
 
 # =====================================================
@@ -1482,7 +1779,7 @@ def render_admin_review_queue() -> None:
         with st.container(border=True):
             risk_color = {"LOW": "🟢", "MEDIUM": "🟡", "HIGH": "🔴"}.get(advice["risk"], "⚪")
             st.markdown(
-                f"**{item.get('employee_id')}** — {item['section_code']} / {item['item_name']} "
+                f"**{item.get('employee_id')}** — {_section_display(item['section_code'])} / {item['item_name']} "
                 f"{risk_color} Risk: {advice['risk']}"
             )
             c1, c2, c3, c4 = st.columns(4)
@@ -1695,8 +1992,6 @@ ALLOWANCE_TYPES: List[str] = [
     "Electricity Expenses",
     "Professional Membership Fees",
     "Software Subscription Costs",
-    "Skill Development and Certification Programs",
-    "Other approved expenses as per company policy",
 ]
 
 
@@ -1862,10 +2157,10 @@ def update_allowance_claim(claim_id: int, employee_id: str,
         row = _row_to_dict(cur)
         if not row:
             raise ValueError("Claim not found.")
-        if row.get("status") not in ("RESUBMISSION_REQUIRED", "REJECTED", "DRAFT"):
-            raise ValueError("Only draft / resubmission / rejected claims can be updated.")
+        if row.get("status") not in ("RESUBMISSION_REQUIRED", "REJECTED", "DRAFT", "RESUBMITTED", "SUBMITTED"):
+            raise ValueError("Only draft / submitted / resubmission / rejected claims can be updated.")
 
-        next_status = "RESUBMITTED" if row.get("status") in ("RESUBMISSION_REQUIRED", "REJECTED") else "SUBMITTED"
+        next_status = "RESUBMITTED" if row.get("status") in ("RESUBMISSION_REQUIRED", "REJECTED", "RESUBMITTED") else "SUBMITTED"
 
         file_args: tuple = ()
         if file_obj is not None:
@@ -2213,7 +2508,7 @@ def render_monthly_allowances_panel(employee_id: str) -> None:
 
     with manage_tab:
         editable = [c for c in claims if c.get("status") in
-                    {"DRAFT", "RESUBMISSION_REQUIRED", "REJECTED", "RESUBMITTED"}]
+                    {"DRAFT", "SUBMITTED", "RESUBMISSION_REQUIRED", "REJECTED", "RESUBMITTED"}]
         if not editable:
             st.info("No editable claims right now.")
         for claim in editable:
