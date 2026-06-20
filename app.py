@@ -3659,12 +3659,15 @@ with left:
             st.markdown("### 📝 Compliance")
             if st.session_state.role == "Admin":
                 panel_button("🛡️ Review Queue", "Compliance Review Queue")
+                panel_button("🧾 Allowance Review", "Compliance Allowance Review")
                 panel_button("🔄 Regime Change Requests", "Compliance Regime Change")
                 panel_button("📈 Compliance Reports", "Compliance Reports")
+                panel_button("⚙️ Workflow Settings", "Compliance Workflow Settings")
             else:
                 panel_button("📋 Tax Regime", "Compliance Tax Regime")
                 panel_button("🧾 Investment Declaration", "Compliance Investment Declaration")
                 panel_button("📎 Proof Submission", "Compliance Proof Submission")
+                panel_button("💰 Monthly Allowances", "Compliance Monthly Allowances")
                 panel_button("📊 My Declaration", "Compliance My Declaration")
 
     # ---- Admin Mode toggle (sidebar bottom) ------------------------------
@@ -3775,8 +3778,10 @@ with right:
         "Knowledge Base", "Question Analytics", "Admin Analytics",
         "Compliance Tax Regime", "Compliance Investment Declaration",
         "Compliance Proof Submission", "Compliance My Declaration",
-        "Compliance Review Queue", "Compliance Regime Change",
-        "Compliance Reports",
+        "Compliance Monthly Allowances",
+        "Compliance Review Queue", "Compliance Allowance Review",
+        "Compliance Regime Change", "Compliance Reports",
+        "Compliance Workflow Settings",
     ]
 
     if selected_panel in locked_panels and not st.session_state.get("start_completed", False):
@@ -4060,6 +4065,15 @@ with right:
         else:
             st.error("Compliance module not available.")
 
+    elif selected_panel == "Compliance Monthly Allowances":
+        if _COMPLIANCE_AVAILABLE:
+            _init_compliance_once()
+            compliance_module.render_monthly_allowances_panel(
+                str(st.session_state.get("employee_id", ""))
+            )
+        else:
+            st.error("Compliance module not available.")
+
     # ---- 📝 Compliance panels (admin) ----
     elif selected_panel == "Compliance Review Queue" and st.session_state.role == "Admin":
         if _COMPLIANCE_AVAILABLE:
@@ -4079,6 +4093,20 @@ with right:
         if _COMPLIANCE_AVAILABLE:
             _init_compliance_once()
             compliance_module.render_admin_compliance_reports()
+        else:
+            st.error("Compliance module not available.")
+
+    elif selected_panel == "Compliance Allowance Review" and st.session_state.role == "Admin":
+        if _COMPLIANCE_AVAILABLE:
+            _init_compliance_once()
+            compliance_module.render_admin_allowance_review_queue()
+        else:
+            st.error("Compliance module not available.")
+
+    elif selected_panel == "Compliance Workflow Settings" and st.session_state.role == "Admin":
+        if _COMPLIANCE_AVAILABLE:
+            _init_compliance_once()
+            compliance_module.render_admin_workflow_settings()
         else:
             st.error("Compliance module not available.")
 

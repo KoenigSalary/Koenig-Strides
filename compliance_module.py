@@ -354,6 +354,31 @@ def ensure_schema() -> None:
                 updated_on {ts}
             )
         """)
+        # ---- Phase B: Monthly Allowance Claims ----
+        cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS compliance_allowance_claims (
+                id {pk},
+                employee_id TEXT NOT NULL,
+                financial_year TEXT NOT NULL,
+                claim_month TEXT NOT NULL,
+                allowance_type TEXT NOT NULL,
+                amount NUMERIC NOT NULL DEFAULT 0,
+                approved_amount NUMERIC DEFAULT 0,
+                expense_details TEXT,
+                vendor_name TEXT,
+                bill_reference TEXT,
+                status TEXT DEFAULT 'SUBMITTED',
+                reviewer_remarks TEXT,
+                file_name TEXT,
+                file_size INTEGER,
+                file_type TEXT,
+                file_bytes {blob},
+                resubmission_count INTEGER DEFAULT 0,
+                submitted_on {ts},
+                reviewed_on {ts},
+                updated_on {ts}
+            )
+        """)
         conn.commit()
         _INIT_DONE = True
     finally:
@@ -932,6 +957,16 @@ def export_compliance_excel() -> bytes:
         cur.execute(f"SELECT * FROM compliance_regime_change_requests WHERE financial_year={_ph()}",
                     (CURRENT_FY,))
         rcrs = _rows_to_dicts(cur)
+        # Allowances — exclude the binary blob so the Excel stays small.
+        cur.execute(
+            f"""SELECT id, employee_id, financial_year, claim_month, allowance_type,
+                   amount, approved_amount, expense_details, vendor_name, bill_reference,
+                   status, reviewer_remarks, file_name, file_size, file_type,
+                   resubmission_count, submitted_on, reviewed_on, updated_on
+            FROM compliance_allowance_claims WHERE financial_year={_ph()}""",
+            (CURRENT_FY,),
+        )
+        allowances = _rows_to_dicts(cur)
         cur.execute("SELECT * FROM compliance_audit_logs ORDER BY id DESC LIMIT 500")
         audit = _rows_to_dicts(cur)
     finally:
@@ -942,6 +977,7 @@ def export_compliance_excel() -> bytes:
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         pd.DataFrame(headers).to_excel(writer, sheet_name="Headers", index=False)
         pd.DataFrame(items).to_excel(writer, sheet_name="Declarations", index=False)
+        pd.DataFrame(allowances).to_excel(writer, sheet_name="Allowances", index=False)
         pd.DataFrame(rcrs).to_excel(writer, sheet_name="Regime Changes", index=False)
         pd.DataFrame(audit).to_excel(writer, sheet_name="Audit", index=False)
     buf.seek(0)
@@ -1567,6 +1603,15 @@ def render_admin_compliance_reports() -> None:
     c5.metric("Total declared", _money(dash["total_declared"]))
     c6.metric("Total approved", _money(dash["total_approved"]))
 
+    # Allowance KPIs
+    adash = allowance_dashboard()
+    st.markdown("### 🧾 Monthly Allowances")
+    a1, a2, a3, a4 = st.columns(4)
+    a1.metric("Total claims", adash["total_claims"])
+    a2.metric("Pending review", adash["pending_review"])
+    a3.metric("Total claimed", _money(adash["total_claimed"]))
+    a4.metric("Total approved", _money(adash["total_approved"]))
+
     conn = _get_conn()
     cur = conn.cursor()
     try:
@@ -1595,6 +1640,26 @@ def render_admin_compliance_reports() -> None:
         ] if c in df.columns]
         st.dataframe(df[display_cols], use_container_width=True, hide_index=True)
 
+    # Allowance breakdown
+    all_claims = list_allowance_claims()
+    if all_claims:
+        adf = pd.DataFrame(all_claims)
+        st.subheader("Allowance-type breakdown")
+        if "allowance_type" in adf.columns:
+            summary = adf.groupby("allowance_type", dropna=False).agg(
+                claims=("id", "count"),
+                claimed=("amount", lambda x: pd.to_numeric(x, errors="coerce").sum()),
+                approved=("approved_amount", lambda x: pd.to_numeric(x, errors="coerce").sum()),
+            ).reset_index()
+            st.dataframe(summary, use_container_width=True, hide_index=True)
+
+        st.subheader("All allowance claims")
+        display_cols = [c for c in [
+            "id", "employee_id", "claim_month", "allowance_type",
+            "amount", "approved_amount", "status", "submitted_on",
+        ] if c in adf.columns]
+        st.dataframe(adf[display_cols], use_container_width=True, hide_index=True)
+
     st.markdown("---")
     excel_bytes = export_compliance_excel()
     st.download_button(
@@ -1619,3 +1684,720 @@ def render_admin_compliance_reports() -> None:
             st.dataframe(adf, use_container_width=True, hide_index=True)
         else:
             st.info("No audit entries yet.")
+
+
+# =====================================================
+# PHASE B — MONTHLY ALLOWANCES
+# =====================================================
+
+ALLOWANCE_TYPES: List[str] = [
+    "Telephone / Internet Expenses",
+    "Electricity Expenses",
+    "Professional Membership Fees",
+    "Software Subscription Costs",
+    "Skill Development and Certification Programs",
+    "Other approved expenses as per company policy",
+]
+
+
+# --- Settings helpers (allowance window + cutoff day) ---
+
+def get_setting(key: str, default: str = "") -> str:
+    ensure_schema()
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            f"SELECT setting_value FROM compliance_settings WHERE setting_key={_ph()}",
+            (key,),
+        )
+        row = cur.fetchone()
+        return row[0] if row else default
+    finally:
+        cur.close()
+        conn.close()
+
+
+def set_setting(key: str, value: str, actor_id: str = "admin") -> None:
+    ensure_schema()
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        # Upsert: try update, then insert if no row.
+        cur.execute(
+            f"UPDATE compliance_settings SET setting_value={_ph()}, updated_on={_ph()} "
+            f"WHERE setting_key={_ph()}",
+            (value, _now(), key),
+        )
+        affected = cur.rowcount or 0
+        if affected == 0:
+            cur.execute(
+                f"INSERT INTO compliance_settings (setting_key, setting_value, updated_on) "
+                f"VALUES ({_ph()},{_ph()},{_ph()})",
+                (key, value, _now()),
+            )
+        conn.commit()
+    finally:
+        cur.close()
+        conn.close()
+    _audit(actor_id, "UPDATE_SETTING", "settings", key, f"{key}={value}")
+
+
+def allowance_window_open() -> bool:
+    """True if today is within the configured submission window."""
+    override = get_setting("allowance_window_override", "OPEN")
+    if override == "OPEN":
+        return True
+    if override == "CLOSED":
+        return False
+    # 'CONTROLLED' — gate by cutoff day
+    try:
+        cutoff = int(get_setting("allowance_cutoff_day", "25"))
+    except ValueError:
+        cutoff = 25
+    return dt.datetime.now().day <= cutoff
+
+
+# --- Validation ---
+
+def validate_allowance_payload(payload: Dict[str, Any]) -> List[str]:
+    errors: List[str] = []
+    if not payload.get("claim_month"):
+        errors.append("Claim month is required.")
+    if payload.get("allowance_type") not in ALLOWANCE_TYPES:
+        errors.append("Allowance type is invalid.")
+    try:
+        amount = float(payload.get("amount") or 0)
+        if amount <= 0:
+            errors.append("Amount must be greater than zero.")
+        if not float(amount).is_integer():
+            errors.append("Amount should be a whole number only.")
+    except Exception:
+        errors.append("Amount must be numeric.")
+    if not (payload.get("expense_details") or "").strip():
+        errors.append("Expense details / business justification is required.")
+    return errors
+
+
+# --- CRUD ---
+
+def save_allowance_claim(employee_id: str, payload: Dict[str, Any], file_obj) -> int:
+    """Insert a new allowance claim. Returns new claim id."""
+    if not allowance_window_open():
+        raise ValueError("Allowance submission window is currently closed.")
+    if file_obj is None:
+        raise ValueError("A supporting document is required.")
+
+    file_bytes = file_obj.getbuffer().tobytes() if hasattr(file_obj.getbuffer(), "tobytes") else bytes(file_obj.getbuffer())
+    size = len(file_bytes)
+    if size > MAX_PROOF_SIZE_BYTES:
+        raise ValueError(f"File too large ({size//1024} KB). Max is {MAX_PROOF_SIZE_BYTES//1024} KB.")
+    fname = getattr(file_obj, "name", "claim")
+    ext = "." + fname.rsplit(".", 1)[-1].lower() if "." in fname else ""
+    if ext not in ALLOWED_PROOF_EXT:
+        raise ValueError(f"File type '{ext}' not allowed. Use PDF / JPG / PNG.")
+    ftype = getattr(file_obj, "type", "") or ""
+
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        if _is_pg():
+            import psycopg2
+            cur.execute(
+                f"""INSERT INTO compliance_allowance_claims
+                (employee_id, financial_year, claim_month, allowance_type, amount,
+                 expense_details, vendor_name, bill_reference, status,
+                 file_name, file_size, file_type, file_bytes,
+                 submitted_on, updated_on)
+                VALUES ({','.join([_ph()] * 15)}) RETURNING id""",
+                (
+                    employee_id, CURRENT_FY, payload["claim_month"],
+                    payload["allowance_type"], int(payload["amount"] or 0),
+                    payload.get("expense_details", ""),
+                    payload.get("vendor_name", ""), payload.get("bill_reference", ""),
+                    "SUBMITTED",
+                    fname, size, ftype, psycopg2.Binary(file_bytes),
+                    _now(), _now(),
+                ),
+            )
+            new_id = cur.fetchone()[0]
+        else:
+            cur.execute(
+                f"""INSERT INTO compliance_allowance_claims
+                (employee_id, financial_year, claim_month, allowance_type, amount,
+                 expense_details, vendor_name, bill_reference, status,
+                 file_name, file_size, file_type, file_bytes,
+                 submitted_on, updated_on)
+                VALUES ({','.join([_ph()] * 15)})""",
+                (
+                    employee_id, CURRENT_FY, payload["claim_month"],
+                    payload["allowance_type"], int(payload["amount"] or 0),
+                    payload.get("expense_details", ""),
+                    payload.get("vendor_name", ""), payload.get("bill_reference", ""),
+                    "SUBMITTED",
+                    fname, size, ftype, file_bytes,
+                    _now(), _now(),
+                ),
+            )
+            new_id = cur.lastrowid
+        conn.commit()
+    finally:
+        cur.close()
+        conn.close()
+    _audit(employee_id, "ADD_ALLOWANCE_CLAIM", "allowance_claim", str(new_id),
+           f"{payload['allowance_type']}:{payload['amount']}")
+    return new_id
+
+
+def update_allowance_claim(claim_id: int, employee_id: str,
+                            payload: Dict[str, Any], file_obj=None) -> None:
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            f"SELECT status FROM compliance_allowance_claims "
+            f"WHERE id={_ph()} AND employee_id={_ph()}",
+            (claim_id, employee_id),
+        )
+        row = _row_to_dict(cur)
+        if not row:
+            raise ValueError("Claim not found.")
+        if row.get("status") not in ("RESUBMISSION_REQUIRED", "REJECTED", "DRAFT"):
+            raise ValueError("Only draft / resubmission / rejected claims can be updated.")
+
+        next_status = "RESUBMITTED" if row.get("status") in ("RESUBMISSION_REQUIRED", "REJECTED") else "SUBMITTED"
+
+        file_args: tuple = ()
+        if file_obj is not None:
+            blob = file_obj.getbuffer().tobytes() if hasattr(file_obj.getbuffer(), "tobytes") else bytes(file_obj.getbuffer())
+            size = len(blob)
+            if size > MAX_PROOF_SIZE_BYTES:
+                raise ValueError(f"File too large ({size//1024} KB).")
+            fname = getattr(file_obj, "name", "claim")
+            ext = "." + fname.rsplit(".", 1)[-1].lower() if "." in fname else ""
+            if ext not in ALLOWED_PROOF_EXT:
+                raise ValueError(f"File type '{ext}' not allowed.")
+            ftype = getattr(file_obj, "type", "") or ""
+            if _is_pg():
+                import psycopg2
+                blob = psycopg2.Binary(blob)
+
+            cur.execute(
+                f"""UPDATE compliance_allowance_claims SET
+                claim_month={_ph()}, allowance_type={_ph()}, amount={_ph()},
+                expense_details={_ph()}, vendor_name={_ph()}, bill_reference={_ph()},
+                status={_ph()}, file_name={_ph()}, file_size={_ph()}, file_type={_ph()},
+                file_bytes={_ph()}, resubmission_count=resubmission_count+1,
+                updated_on={_ph()} WHERE id={_ph()}""",
+                (
+                    payload["claim_month"], payload["allowance_type"], int(payload["amount"] or 0),
+                    payload.get("expense_details", ""), payload.get("vendor_name", ""),
+                    payload.get("bill_reference", ""),
+                    next_status, fname, size, ftype, blob,
+                    _now(), claim_id,
+                ),
+            )
+        else:
+            cur.execute(
+                f"""UPDATE compliance_allowance_claims SET
+                claim_month={_ph()}, allowance_type={_ph()}, amount={_ph()},
+                expense_details={_ph()}, vendor_name={_ph()}, bill_reference={_ph()},
+                status={_ph()}, resubmission_count=resubmission_count+1,
+                updated_on={_ph()} WHERE id={_ph()}""",
+                (
+                    payload["claim_month"], payload["allowance_type"], int(payload["amount"] or 0),
+                    payload.get("expense_details", ""), payload.get("vendor_name", ""),
+                    payload.get("bill_reference", ""),
+                    next_status, _now(), claim_id,
+                ),
+            )
+        conn.commit()
+    finally:
+        cur.close()
+        conn.close()
+    _audit(employee_id, "UPDATE_ALLOWANCE_CLAIM", "allowance_claim", str(claim_id), next_status)
+
+
+def delete_allowance_claim(claim_id: int, employee_id: str) -> None:
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            f"SELECT status FROM compliance_allowance_claims "
+            f"WHERE id={_ph()} AND employee_id={_ph()}",
+            (claim_id, employee_id),
+        )
+        row = _row_to_dict(cur)
+        if not row:
+            raise ValueError("Claim not found.")
+        if row.get("status") not in ("DRAFT", "RESUBMISSION_REQUIRED", "REJECTED"):
+            raise ValueError("Only draft / resubmission / rejected claims can be deleted.")
+        cur.execute(
+            f"DELETE FROM compliance_allowance_claims WHERE id={_ph()}",
+            (claim_id,),
+        )
+        conn.commit()
+    finally:
+        cur.close()
+        conn.close()
+    _audit(employee_id, "DELETE_ALLOWANCE_CLAIM", "allowance_claim", str(claim_id), "")
+
+
+def list_allowance_claims(employee_id: Optional[str] = None,
+                           only_pending: bool = False) -> List[Dict[str, Any]]:
+    ensure_schema()
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        sql = (
+            f"SELECT id, employee_id, financial_year, claim_month, allowance_type, "
+            f"amount, approved_amount, expense_details, vendor_name, bill_reference, "
+            f"status, reviewer_remarks, file_name, file_size, file_type, "
+            f"resubmission_count, submitted_on, reviewed_on, updated_on "
+            f"FROM compliance_allowance_claims WHERE financial_year={_ph()}"
+        )
+        params: List[Any] = [CURRENT_FY]
+        if employee_id:
+            sql += f" AND employee_id={_ph()}"
+            params.append(employee_id)
+        if only_pending:
+            sql += " AND status IN ('SUBMITTED','RESUBMITTED','UNDER REVIEW')"
+        sql += " ORDER BY submitted_on DESC, id DESC"
+        cur.execute(sql, tuple(params))
+        return _rows_to_dicts(cur)
+    finally:
+        cur.close()
+        conn.close()
+
+
+def review_allowance_claim(claim_id: int, approved_amount: float, status: str,
+                            remarks: str, reviewer_id: str) -> None:
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            f"UPDATE compliance_allowance_claims SET "
+            f"approved_amount={_ph()}, status={_ph()}, reviewer_remarks={_ph()}, "
+            f"reviewed_on={_ph()}, updated_on={_ph()} WHERE id={_ph()}",
+            (int(approved_amount or 0), status, remarks, _now(), _now(), claim_id),
+        )
+        conn.commit()
+    finally:
+        cur.close()
+        conn.close()
+    _audit(reviewer_id, "REVIEW_ALLOWANCE", "allowance_claim", str(claim_id),
+           f"{status}:{approved_amount}")
+
+
+def get_allowance_proof_bytes(claim_id: int) -> Optional[Tuple[bytes, str, str]]:
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            f"SELECT file_bytes, file_name, file_type FROM compliance_allowance_claims "
+            f"WHERE id={_ph()}",
+            (claim_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        blob = bytes(row[0]) if row[0] is not None else b""
+        return blob, row[1] or "claim", row[2] or "application/octet-stream"
+    finally:
+        cur.close()
+        conn.close()
+
+
+# --- AI risk engine for allowances ---
+
+def evaluate_allowance(claim: Dict[str, Any]) -> Dict[str, Any]:
+    reasons: List[str] = []
+    risk = "LOW"
+    recommended_status = "APPROVED"
+
+    amount = float(claim.get("amount") or 0)
+    approved_ceiling = amount
+
+    if amount <= 0:
+        risk = "HIGH"
+        recommended_status = "REJECTED"
+        reasons.append("Allowance amount must be greater than zero.")
+        approved_ceiling = 0
+
+    if not float(amount).is_integer():
+        risk = "HIGH"
+        recommended_status = "RESUBMISSION_REQUIRED"
+        reasons.append("Amount should be a whole number.")
+
+    if not claim.get("file_name"):
+        risk = "HIGH"
+        recommended_status = "RESUBMISSION_REQUIRED"
+        reasons.append("Supporting document is missing.")
+
+    if not (claim.get("expense_details") or "").strip():
+        risk = "MEDIUM" if risk == "LOW" else risk
+        if recommended_status == "APPROVED":
+            recommended_status = "RESUBMISSION_REQUIRED"
+        reasons.append("Expense details / business justification missing.")
+
+    if amount > 25000:
+        if risk == "LOW":
+            risk = "MEDIUM"
+        reasons.append("High-value claim (>₹25,000) — manual verification recommended.")
+
+    if not (claim.get("vendor_name") or "").strip():
+        if risk == "LOW":
+            risk = "MEDIUM"
+        if recommended_status == "APPROVED":
+            recommended_status = "UNDER REVIEW"
+        reasons.append("Vendor name not specified.")
+
+    if not reasons:
+        reasons.append("Claim looks structurally complete.")
+
+    return {
+        "risk": risk,
+        "recommended_status": recommended_status,
+        "approved_ceiling": int(approved_ceiling),
+        "reasons": reasons,
+    }
+
+
+# --- Aggregates for reports ---
+
+def allowance_dashboard() -> Dict[str, Any]:
+    ensure_schema()
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            f"SELECT COUNT(*) FROM compliance_allowance_claims WHERE financial_year={_ph()}",
+            (CURRENT_FY,),
+        )
+        total = cur.fetchone()[0] or 0
+        cur.execute(
+            f"""SELECT COUNT(*) FROM compliance_allowance_claims
+                WHERE financial_year={_ph()} AND status IN ('SUBMITTED','RESUBMITTED','UNDER REVIEW')""",
+            (CURRENT_FY,),
+        )
+        pending = cur.fetchone()[0] or 0
+        cur.execute(
+            f"SELECT COALESCE(SUM(amount),0), COALESCE(SUM(approved_amount),0) "
+            f"FROM compliance_allowance_claims WHERE financial_year={_ph()}",
+            (CURRENT_FY,),
+        )
+        claimed, approved = cur.fetchone()
+        return {
+            "total_claims": int(total),
+            "pending_review": int(pending),
+            "total_claimed": float(claimed or 0),
+            "total_approved": float(approved or 0),
+        }
+    finally:
+        cur.close()
+        conn.close()
+
+
+# =====================================================
+# UI PANELS — ALLOWANCES (employee)
+# =====================================================
+
+def _claim_month_options() -> List[str]:
+    """Return the current month and the previous two months as YYYY-MM strings."""
+    today = dt.date.today()
+    months = []
+    y, m = today.year, today.month
+    for _ in range(3):
+        months.append(f"{y:04d}-{m:02d}")
+        m -= 1
+        if m == 0:
+            m = 12
+            y -= 1
+    return months
+
+
+def _render_allowance_form(prefix: str, defaults: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    defaults = defaults or {}
+    months = _claim_month_options()
+    default_month = defaults.get("claim_month") or months[0]
+    if default_month not in months:
+        months = [default_month] + months
+    c1, c2, c3 = st.columns(3)
+    claim_month = c1.selectbox(
+        "Claim month", months,
+        index=months.index(default_month),
+        key=f"am_{prefix}",
+    )
+    default_type = defaults.get("allowance_type", ALLOWANCE_TYPES[0])
+    allowance_type = c2.selectbox(
+        "Allowance type", ALLOWANCE_TYPES,
+        index=ALLOWANCE_TYPES.index(default_type) if default_type in ALLOWANCE_TYPES else 0,
+        key=f"at_{prefix}",
+    )
+    amount = c3.number_input(
+        "Amount (₹)", min_value=0, step=1,
+        value=int(defaults.get("amount") or 0),
+        key=f"aa_{prefix}",
+    )
+    expense_details = st.text_area(
+        "Expense details / business justification",
+        value=defaults.get("expense_details", ""),
+        key=f"ae_{prefix}",
+        placeholder="Briefly explain the business purpose / what this claim covers",
+    )
+    c1, c2 = st.columns(2)
+    vendor_name = c1.text_input(
+        "Vendor name", value=defaults.get("vendor_name", ""),
+        key=f"av_{prefix}",
+    )
+    bill_reference = c2.text_input(
+        "Bill / invoice reference", value=defaults.get("bill_reference", ""),
+        key=f"ab_{prefix}",
+    )
+    return {
+        "claim_month": claim_month,
+        "allowance_type": allowance_type,
+        "amount": amount,
+        "expense_details": expense_details,
+        "vendor_name": vendor_name,
+        "bill_reference": bill_reference,
+    }
+
+
+def render_monthly_allowances_panel(employee_id: str) -> None:
+    ensure_schema()
+    st.markdown("## 🧾 Monthly Allowances")
+    st.caption(
+        "Submit reimbursable expenses (Telephone / Internet, Electricity, Professional "
+        "Membership, Software, Skill Development, etc.). Attach a supporting bill / "
+        "receipt with each claim."
+    )
+
+    window_open = allowance_window_open()
+    if not window_open:
+        cutoff = get_setting("allowance_cutoff_day", "25")
+        st.error(
+            f"⛔ Submission window is currently **closed**. "
+            f"(Cutoff day: {cutoff} of every month.)"
+        )
+
+    add_tab, manage_tab = st.tabs(["➕ Submit New Claim", "✏️ Manage / Resubmit"])
+
+    with add_tab:
+        with st.form("add_allowance_form"):
+            payload = _render_allowance_form("add")
+            file_obj = st.file_uploader(
+                "Supporting document (PDF / JPG / PNG, max 5MB)",
+                type=["pdf", "jpg", "jpeg", "png"],
+                accept_multiple_files=False,
+                key="add_allowance_file",
+            )
+            if st.form_submit_button("Submit allowance claim", type="primary",
+                                       use_container_width=True,
+                                       disabled=not window_open):
+                errors = validate_allowance_payload(payload)
+                if file_obj is None:
+                    errors.append("Please attach a supporting document.")
+                if errors:
+                    for err in errors:
+                        st.error(err)
+                else:
+                    try:
+                        new_id = save_allowance_claim(employee_id, payload, file_obj)
+                        st.success(f"✅ Allowance claim #{new_id} submitted.")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(str(exc))
+
+    claims = list_allowance_claims(employee_id)
+
+    with manage_tab:
+        editable = [c for c in claims if c.get("status") in
+                    {"DRAFT", "RESUBMISSION_REQUIRED", "REJECTED", "RESUBMITTED"}]
+        if not editable:
+            st.info("No editable claims right now.")
+        for claim in editable:
+            with st.expander(
+                f"#{claim['id']} • {claim['allowance_type']} • "
+                f"₹{int(claim['amount'] or 0):,} • {claim['claim_month']} • {claim['status']}"
+            ):
+                with st.form(f"edit_allowance_{claim['id']}"):
+                    payload = _render_allowance_form(f"e{claim['id']}", claim)
+                    new_file = st.file_uploader(
+                        "Replace supporting document (optional)",
+                        type=["pdf", "jpg", "jpeg", "png"],
+                        accept_multiple_files=False,
+                        key=f"replace_file_{claim['id']}",
+                    )
+                    c1, c2 = st.columns(2)
+                    save_clicked = c1.form_submit_button("💾 Update claim",
+                                                          type="primary",
+                                                          use_container_width=True)
+                    del_clicked = c2.form_submit_button("🗑️ Delete claim",
+                                                         use_container_width=True)
+                    if save_clicked:
+                        errors = validate_allowance_payload(payload)
+                        if errors:
+                            for err in errors:
+                                st.error(err)
+                        else:
+                            try:
+                                update_allowance_claim(claim["id"], employee_id,
+                                                        payload, new_file)
+                                st.success("Claim updated.")
+                                st.rerun()
+                            except Exception as exc:
+                                st.error(str(exc))
+                    if del_clicked:
+                        try:
+                            delete_allowance_claim(claim["id"], employee_id)
+                            st.success("Claim deleted.")
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(str(exc))
+
+    if claims:
+        st.markdown("---")
+        st.subheader("📋 All my allowance claims")
+        df = pd.DataFrame(claims)
+        display_cols = [c for c in [
+            "id", "claim_month", "allowance_type", "amount", "approved_amount",
+            "vendor_name", "bill_reference", "status", "reviewer_remarks",
+            "submitted_on", "reviewed_on",
+        ] if c in df.columns]
+        st.dataframe(df[display_cols], use_container_width=True, hide_index=True)
+        csv = df[display_cols].to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "⬇️ Download my allowances (CSV)",
+            data=csv,
+            file_name=f"{employee_id}_allowances_{CURRENT_FY.replace(' ','_')}.csv",
+            mime="text/csv",
+        )
+    else:
+        st.info("No allowance claims yet. Submit your first claim above.")
+
+
+# =====================================================
+# UI PANELS — ALLOWANCES (admin)
+# =====================================================
+
+def render_admin_allowance_review_queue() -> None:
+    ensure_schema()
+    st.markdown("## 🧾 Allowance Review Queue")
+    claims = list_allowance_claims(only_pending=True)
+    if not claims:
+        st.info("No allowance claims awaiting review.")
+        return
+    st.caption(f"📬 {len(claims)} claim(s) awaiting review")
+
+    for claim in claims:
+        advice = evaluate_allowance(claim)
+        with st.container(border=True):
+            risk_icon = {"LOW": "🟢", "MEDIUM": "🟡", "HIGH": "🔴"}.get(advice["risk"], "⚪")
+            st.markdown(
+                f"**{claim['employee_id']}** • {claim['allowance_type']} "
+                f"({claim['claim_month']}) {risk_icon} Risk: {advice['risk']}"
+            )
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Claimed", _money(claim.get("amount")))
+            c2.metric("Suggested cap", _money(advice["approved_ceiling"]))
+            c3.metric("Status", claim.get("status"))
+            c4.metric("Resubmissions", int(claim.get("resubmission_count") or 0))
+
+            if claim.get("vendor_name"):
+                st.caption(f"**Vendor:** {claim.get('vendor_name')}  "
+                           f"• **Bill ref:** {claim.get('bill_reference') or '-'}")
+            if claim.get("expense_details"):
+                st.caption(f"**Details:** {claim.get('expense_details')}")
+
+            with st.expander("🤖 AI advice"):
+                st.markdown(f"**Recommendation:** `{advice['recommended_status']}`")
+                for r in advice["reasons"]:
+                    st.markdown(f"- {r}")
+
+            # Proof viewer
+            if claim.get("file_name"):
+                size_kb = (claim.get("file_size") or 0) // 1024
+                col_a, col_b = st.columns([3, 1])
+                col_a.markdown(f"📎 {claim['file_name']} ({size_kb} KB)")
+                if col_b.button("⬇️ Download", key=f"adl_{claim['id']}"):
+                    res = get_allowance_proof_bytes(claim["id"])
+                    if res:
+                        data, fname, mime = res
+                        st.download_button(
+                            f"Save {fname}",
+                            data=data, file_name=fname, mime=mime,
+                            key=f"adl_btn_{claim['id']}",
+                        )
+
+            approved = st.number_input(
+                "Approved amount (₹)", min_value=0, step=1,
+                value=int(claim.get("approved_amount") or advice["approved_ceiling"] or 0),
+                key=f"apa_{claim['id']}",
+            )
+            actions = ["UNDER REVIEW", "RESUBMISSION_REQUIRED", "APPROVED", "REJECTED"]
+            default_action = advice["recommended_status"] if advice["recommended_status"] in actions else "UNDER REVIEW"
+            action = st.selectbox(
+                "Action", actions,
+                index=actions.index(default_action),
+                key=f"aaa_{claim['id']}",
+            )
+            remarks = st.text_area(
+                "Reviewer remarks", value="; ".join(advice["reasons"]),
+                key=f"ara_{claim['id']}",
+            )
+            if st.button(f"💾 Save review #{claim['id']}",
+                         key=f"asa_{claim['id']}", type="primary"):
+                reviewer_id = st.session_state.get("employee_id", "admin")
+                try:
+                    review_allowance_claim(claim["id"], approved, action, remarks, reviewer_id)
+                    st.success("Review saved.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(str(exc))
+
+
+def render_admin_workflow_settings() -> None:
+    ensure_schema()
+    st.markdown("## ⚙️ Compliance Workflow Settings")
+    st.caption("Controls the allowance submission window for employees.")
+
+    current_override = get_setting("allowance_window_override", "OPEN")
+    current_cutoff = int(get_setting("allowance_cutoff_day", "25") or 25)
+
+    with st.container(border=True):
+        st.markdown("### Allowance Submission Window")
+        override_options = ["OPEN", "CONTROLLED", "CLOSED"]
+        new_override = st.radio(
+            "Window mode",
+            override_options,
+            index=override_options.index(current_override) if current_override in override_options else 0,
+            help=(
+                "**OPEN** — employees can submit any day (default).\n\n"
+                "**CONTROLLED** — submissions allowed only up to the cutoff day each month.\n\n"
+                "**CLOSED** — submissions blocked completely (e.g. during freeze week)."
+            ),
+        )
+        new_cutoff = st.number_input(
+            "Cutoff day (used only in CONTROLLED mode)",
+            min_value=1, max_value=31, step=1,
+            value=current_cutoff,
+        )
+        if st.button("💾 Save settings", type="primary"):
+            reviewer_id = st.session_state.get("employee_id", "admin")
+            try:
+                set_setting("allowance_window_override", new_override, reviewer_id)
+                set_setting("allowance_cutoff_day", str(int(new_cutoff)), reviewer_id)
+                st.success("Settings saved.")
+                st.rerun()
+            except Exception as exc:
+                st.error(str(exc))
+
+    st.markdown("---")
+    st.markdown("### Current effective status")
+    is_open = allowance_window_open()
+    if is_open:
+        st.success(f"✅ Allowance window is currently **OPEN** (mode: {current_override}).")
+    else:
+        st.error(f"⛔ Allowance window is currently **CLOSED** (mode: {current_override}, "
+                 f"cutoff: day {current_cutoff}).")
