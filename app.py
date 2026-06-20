@@ -34,6 +34,41 @@ try:
 except ImportError:
     _PSYCOPG2_AVAILABLE = False
 
+# ---- Compliance module (declarations, proofs, regime workflow) ----
+# Imported lazily-safe: the module only touches the DB when a panel is rendered.
+try:
+    import compliance_module
+    _COMPLIANCE_AVAILABLE = True
+except Exception as _comp_exc:
+    compliance_module = None
+    _COMPLIANCE_AVAILABLE = False
+
+_COMPLIANCE_WIRED = False
+
+def _init_compliance_once():
+    """Wire the compliance module to Strides' DB helpers exactly once per session.
+
+    Safe to call repeatedly — only runs the first time. Pulls the active
+    DB engine (Supabase Postgres or local SQLite) and audit log writer
+    from the surrounding app.py so the compliance code never needs its
+    own connection logic.
+    """
+    global _COMPLIANCE_WIRED
+    if _COMPLIANCE_WIRED or not _COMPLIANCE_AVAILABLE:
+        return
+    try:
+        compliance_module.init(
+            using_postgres_fn=_using_postgres,
+            get_database_url_fn=_get_database_url,
+            psycopg2_available=_PSYCOPG2_AVAILABLE,
+            write_audit_log_fn=write_audit_log,
+        )
+        compliance_module.ensure_schema()
+        _COMPLIANCE_WIRED = True
+    except Exception as exc:
+        # Don't block the whole app if compliance init fails.
+        st.session_state["_compliance_init_error"] = str(exc)
+
 def _get_database_url():
     try:
         return st.secrets.get("DATABASE_URL", "") or ""
@@ -3616,6 +3651,22 @@ with left:
             panel_button("📊 Question Analytics", "Question Analytics")
             panel_button("📈 Admin Analytics", "Admin Analytics")
 
+        # ---- 📝 Compliance section ----
+        # Employees see: Tax Regime / Investment Declaration / Proof Submission / My Declaration
+        # Admins see   : Review Queue / Regime Change Requests / Compliance Reports
+        if _COMPLIANCE_AVAILABLE:
+            st.markdown("---")
+            st.markdown("### 📝 Compliance")
+            if st.session_state.role == "Admin":
+                panel_button("🛡️ Review Queue", "Compliance Review Queue")
+                panel_button("🔄 Regime Change Requests", "Compliance Regime Change")
+                panel_button("📈 Compliance Reports", "Compliance Reports")
+            else:
+                panel_button("📋 Tax Regime", "Compliance Tax Regime")
+                panel_button("🧾 Investment Declaration", "Compliance Investment Declaration")
+                panel_button("📎 Proof Submission", "Compliance Proof Submission")
+                panel_button("📊 My Declaration", "Compliance My Declaration")
+
     # ---- Admin Mode toggle (sidebar bottom) ------------------------------
     # Allows an SSO'd Employee to elevate to Admin within the SAME session
     # by entering a separate admin password — without logging out of RMS.
@@ -3721,7 +3772,11 @@ with right:
 
     locked_panels = [
         "Ask Strides", "User Management",
-        "Knowledge Base", "Question Analytics", "Admin Analytics"
+        "Knowledge Base", "Question Analytics", "Admin Analytics",
+        "Compliance Tax Regime", "Compliance Investment Declaration",
+        "Compliance Proof Submission", "Compliance My Declaration",
+        "Compliance Review Queue", "Compliance Regime Change",
+        "Compliance Reports",
     ]
 
     if selected_panel in locked_panels and not st.session_state.get("start_completed", False):
@@ -3967,6 +4022,65 @@ with right:
 
     elif selected_panel == "Question Analytics" and st.session_state.role == "Admin":
         render_question_analytics()
+
+    # ---- 📝 Compliance panels (employee) ----
+    elif selected_panel == "Compliance Tax Regime":
+        if _COMPLIANCE_AVAILABLE:
+            _init_compliance_once()
+            compliance_module.render_tax_regime_panel(
+                str(st.session_state.get("employee_id", ""))
+            )
+        else:
+            st.error("Compliance module not available.")
+
+    elif selected_panel == "Compliance Investment Declaration":
+        if _COMPLIANCE_AVAILABLE:
+            _init_compliance_once()
+            compliance_module.render_investment_declaration_panel(
+                str(st.session_state.get("employee_id", ""))
+            )
+        else:
+            st.error("Compliance module not available.")
+
+    elif selected_panel == "Compliance Proof Submission":
+        if _COMPLIANCE_AVAILABLE:
+            _init_compliance_once()
+            compliance_module.render_proof_submission_panel(
+                str(st.session_state.get("employee_id", ""))
+            )
+        else:
+            st.error("Compliance module not available.")
+
+    elif selected_panel == "Compliance My Declaration":
+        if _COMPLIANCE_AVAILABLE:
+            _init_compliance_once()
+            compliance_module.render_my_declaration_panel(
+                str(st.session_state.get("employee_id", ""))
+            )
+        else:
+            st.error("Compliance module not available.")
+
+    # ---- 📝 Compliance panels (admin) ----
+    elif selected_panel == "Compliance Review Queue" and st.session_state.role == "Admin":
+        if _COMPLIANCE_AVAILABLE:
+            _init_compliance_once()
+            compliance_module.render_admin_review_queue()
+        else:
+            st.error("Compliance module not available.")
+
+    elif selected_panel == "Compliance Regime Change" and st.session_state.role == "Admin":
+        if _COMPLIANCE_AVAILABLE:
+            _init_compliance_once()
+            compliance_module.render_admin_regime_change_panel()
+        else:
+            st.error("Compliance module not available.")
+
+    elif selected_panel == "Compliance Reports" and st.session_state.role == "Admin":
+        if _COMPLIANCE_AVAILABLE:
+            _init_compliance_once()
+            compliance_module.render_admin_compliance_reports()
+        else:
+            st.error("Compliance module not available.")
 
     elif selected_panel == "Admin Analytics" and st.session_state.role == "Admin":
         render_admin_analytics_dashboard()
