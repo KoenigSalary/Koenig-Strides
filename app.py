@@ -3871,6 +3871,116 @@ with right:
     elif selected_panel == "Admin Analytics" and st.session_state.role == "Admin":
         render_admin_analytics_dashboard()
 
+        # ---- Supabase Connection Health Check (admin-only) ----
+        # Temporary diagnostic to confirm Strides can reach Supabase Postgres.
+        # Safe to leave in production — only admins see it; uses a tiny health
+        # check table; does NOT alter any application data.
+        with st.expander("🔌 Supabase Connection Test (admin diagnostic)", expanded=False):
+            st.caption(
+                "Verifies that Strides can reach the Supabase Postgres database "
+                "using the `DATABASE_URL` secret. Read-only first, then a write test "
+                "into an `app_healthcheck` table."
+            )
+            _db_url_present = bool(_get_database_url())
+            _psycopg_present = _PSYCOPG2_AVAILABLE
+            c1, c2, c3 = st.columns(3)
+            c1.metric("DATABASE_URL secret", "✅ Found" if _db_url_present else "❌ Missing")
+            c2.metric("psycopg2 driver", "✅ Loaded" if _psycopg_present else "❌ Not installed")
+            c3.metric("Active DB engine", "Supabase (Postgres)" if _using_postgres() else "Local SQLite")
+
+            if not _db_url_present:
+                st.warning(
+                    "`DATABASE_URL` is not set in Streamlit Secrets. The app is "
+                    "running on the local SQLite file, which is wiped on every "
+                    "Streamlit restart. Add the Supabase URI to Secrets to enable "
+                    "persistent storage."
+                )
+            if not _psycopg_present:
+                st.warning(
+                    "`psycopg2-binary` is not installed in this environment. "
+                    "It is listed in requirements.txt — the cloud build may still "
+                    "be in progress, or the rebuild failed. Try Manage app → Reboot."
+                )
+
+            colA, colB = st.columns(2)
+
+            with colA:
+                if st.button("Run connection test", use_container_width=True, key="sb_conn_test"):
+                    if not _db_url_present:
+                        st.error("❌ DATABASE_URL not found in Streamlit secrets.")
+                    elif not _psycopg_present:
+                        st.error("❌ psycopg2 driver not available in this build.")
+                    else:
+                        try:
+                            conn = psycopg2.connect(
+                                _get_database_url(),
+                                connect_timeout=8,
+                                sslmode="require",
+                            )
+                            cur = conn.cursor()
+                            cur.execute("SELECT current_database(), current_user, now(), version();")
+                            db_name, db_user, db_time, db_ver = cur.fetchone()
+                            cur.close()
+                            conn.close()
+                            st.success("✅ Supabase connection successful")
+                            st.write("**Database:**", db_name)
+                            st.write("**User:**", db_user)
+                            st.write("**Server time:**", str(db_time))
+                            st.code(db_ver, language="text")
+                        except Exception as exc:
+                            st.error(f"❌ Connection failed: {exc}")
+                            st.caption(
+                                "Common causes: wrong password, password contains "
+                                "un-encoded special chars (`@`, `:`, `/`, `?`, `#`, `%`), "
+                                "Streamlit Cloud is on IPv4 — try the Supabase "
+                                "Session-pooler URI (port 5432, host `aws-*.pooler.supabase.com`)."
+                            )
+
+            with colB:
+                if st.button("Run write test", use_container_width=True, key="sb_write_test"):
+                    if not _db_url_present:
+                        st.error("❌ DATABASE_URL not found in Streamlit secrets.")
+                    elif not _psycopg_present:
+                        st.error("❌ psycopg2 driver not available in this build.")
+                    else:
+                        try:
+                            conn = psycopg2.connect(
+                                _get_database_url(),
+                                connect_timeout=8,
+                                sslmode="require",
+                            )
+                            cur = conn.cursor()
+                            cur.execute(
+                                """
+                                CREATE TABLE IF NOT EXISTS app_healthcheck (
+                                    id SERIAL PRIMARY KEY,
+                                    actor TEXT,
+                                    created_at TIMESTAMPTZ DEFAULT NOW()
+                                )
+                                """
+                            )
+                            conn.commit()
+                            cur.execute(
+                                "INSERT INTO app_healthcheck (actor) VALUES (%s) RETURNING id, created_at;",
+                                (str(st.session_state.get("employee_id", "admin")),),
+                            )
+                            new_id, ts = cur.fetchone()
+                            conn.commit()
+                            cur.execute("SELECT COUNT(*) FROM app_healthcheck;")
+                            total_rows = cur.fetchone()[0]
+                            cur.close()
+                            conn.close()
+                            st.success("✅ Supabase read + write successful")
+                            st.write("**Inserted row id:**", new_id)
+                            st.write("**Server timestamp:**", str(ts))
+                            st.write("**Total rows in app_healthcheck:**", total_rows)
+                            st.caption(
+                                "You can now open Supabase → Table Editor → "
+                                "`app_healthcheck` and see the rows inserted by Strides."
+                            )
+                        except Exception as exc:
+                            st.error(f"❌ Write test failed: {exc}")
+
     else:
         st.warning("You are not authorized to view this panel.")
 
