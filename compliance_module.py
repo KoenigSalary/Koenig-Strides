@@ -990,6 +990,36 @@ def review_declaration_item(item_id: int, approved_amount: float, status: str,
            f"{status}:{approved_amount}")
 
 
+def reopen_employee_declaration(item_id: int, reviewer_id: str, remarks: str = "") -> None:
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            f"SELECT header_id, employee_id FROM compliance_declaration_items WHERE id={_ph()}",
+            (item_id,),
+        )
+        row = _row_to_dict(cur)
+        if not row:
+            raise ValueError("Declaration item not found.")
+        header_id = row["header_id"]
+        employee_id = row["employee_id"]
+        cur.execute(
+            f"UPDATE compliance_declaration_header SET is_locked=0, status='DECLARATION_REOPENED', "
+            f"workflow_stage='DECLARATION', updated_on={_ph()} WHERE id={_ph()}",
+            (_now(), header_id),
+        )
+        cur.execute(
+            f"UPDATE compliance_declaration_items SET status='RESUBMISSION_REQUIRED', updated_on={_ph()} "
+            f"WHERE header_id={_ph()} AND employee_id={_ph()} AND financial_year={_ph()}",
+            (_now(), header_id, employee_id, CURRENT_FY),
+        )
+        conn.commit()
+    finally:
+        cur.close()
+        conn.close()
+    _audit(reviewer_id, "REOPEN_DECLARATION", "header", str(header_id), remarks or employee_id)
+
+
 def compliance_dashboard() -> Dict[str, Any]:
     ensure_schema()
     conn = _get_conn()
@@ -1175,9 +1205,9 @@ def validate_declaration_payload(payload: Dict[str, Any]) -> List[str]:
 
     try:
         declared = float(payload.get("declared_amount") or 0)
-        if declared <= 0:
+        if section != "CHILD_EDU" and declared <= 0:
             errors.append("Declared amount must be greater than zero.")
-        if not float(declared).is_integer():
+        if section != "CHILD_EDU" and not float(declared).is_integer():
             errors.append("Declared amount should be a whole number.")
     except Exception:
         errors.append("Declared amount must be numeric.")
@@ -1316,6 +1346,53 @@ def _set_form_step(prefix: str, step: int) -> None:
     st.session_state[f"nav_step_{prefix}"] = max(1, int(step))
 
 
+def _workflow_panels() -> List[tuple[str, str]]:
+    return [
+        ("tax_regime", "Tax Regime"),
+        ("investment", "Form 12BB / 124 Declaration"),
+        ("my_declaration", "My Declaration"),
+        ("monthly_allowances", "Monthly Allowances"),
+        ("proof_submission", "Proof Submission"),
+    ]
+
+
+def _workflow_nav_buttons(current_key: str) -> None:
+    panels = _workflow_panels()
+    keys = [key for key, _ in panels]
+    labels = {key: label for key, label in panels}
+    idx = keys.index(current_key)
+    prev_key = keys[idx - 1] if idx > 0 else None
+    next_key = keys[idx + 1] if idx < len(keys) - 1 else None
+    st.session_state.setdefault("compliance_target_panel", current_key)
+    c1, c2, c3 = st.columns([1, 2, 1])
+    if c1.button("◀ Back", key=f"page_back_{current_key}", use_container_width=True, disabled=prev_key is None):
+        st.session_state["compliance_target_panel"] = prev_key
+        st.rerun()
+    c2.caption(f"Workflow page: **{labels[current_key]}**")
+    if c3.button("Next ▶", key=f"page_next_{current_key}", use_container_width=True, disabled=next_key is None):
+        st.session_state["compliance_target_panel"] = next_key
+        st.rerun()
+
+
+def _delegate_employee_panel(current_key: str, employee_id: str) -> bool:
+    target = st.session_state.get("compliance_target_panel", current_key)
+    if target == current_key:
+        return False
+    mapping = {
+        "tax_regime": render_tax_regime_panel,
+        "investment": render_investment_declaration_panel,
+        "my_declaration": render_my_declaration_panel,
+        "monthly_allowances": render_monthly_allowances_panel,
+        "proof_submission": render_proof_submission_panel,
+    }
+    fn = mapping.get(target)
+    if fn is None:
+        st.session_state["compliance_target_panel"] = current_key
+        return False
+    fn(employee_id)
+    return True
+
+
 def _render_item_form(prefix: str, defaults: Optional[Dict[str, Any]] = None) -> Tuple[Dict[str, Any], Dict[str, int]]:
     defaults = dict(defaults or {})
     if defaults.get("metadata_json") and not defaults.get("metadata"):
@@ -1361,12 +1438,15 @@ def _render_item_form(prefix: str, defaults: Optional[Dict[str, Any]] = None) ->
     if nav["step"] == 1:
         c1, c2 = st.columns(2)
         c1.selectbox(_required_label("Item"), items, index=items.index(default_item), key=item_key)
-        c2.number_input(
-            _required_label("Declared amount (₹)"), min_value=0, step=1,
-            value=int(defaults.get("declared_amount") or 0), key=amt_key,
-        )
         if section_code == "CHILD_EDU":
+            c2.info("No amount entry required for Children Declaration.")
+            st.session_state[amt_key] = 0
             st.info("Children declaration reminder: if you are claiming Children Education Allowance, please fill the eligible children count and school / institution name in the next step.")
+        else:
+            c2.number_input(
+                _required_label("Declared amount (₹)"), min_value=0, step=1,
+                value=int(defaults.get("declared_amount") or 0), key=amt_key,
+            )
 
     if nav["step"] == 2:
         extra_rendered = False
@@ -1460,7 +1540,7 @@ def _render_item_form(prefix: str, defaults: Optional[Dict[str, Any]] = None) ->
         "section_code": section_code,
         "section_group": cfg["group_name"],
         "item_name": _state_val(item_key, default_item),
-        "declared_amount": int(_state_val(amt_key, defaults.get("declared_amount") or 0) or 0),
+        "declared_amount": 0 if section_code == "CHILD_EDU" else int(_state_val(amt_key, defaults.get("declared_amount") or 0) or 0),
         "expected_proof": _state_val(proof_key, defaults.get("expected_proof") or cfg["expected_proof"]),
         "remarks": "" if section_code == "24(b)" else _state_val(remarks_key, defaults.get("remarks", "")),
         "claimant_for": _state_val(claimant_key, defaults.get("claimant_for", "")),
@@ -1501,9 +1581,12 @@ def _render_item_form(prefix: str, defaults: Optional[Dict[str, Any]] = None) ->
 
 
 def render_tax_regime_panel(employee_id: str) -> None:
+    if _delegate_employee_panel("tax_regime", employee_id):
+        return
     ensure_schema()
     header = get_or_create_header(employee_id)
     st.markdown("## 📋 Tax Regime Selection")
+    _workflow_nav_buttons("tax_regime")
     st.caption(f"Tax Year: **{CURRENT_FY}** • Employee: **{employee_id}**")
 
     c1, c2, c3 = st.columns(3)
@@ -1568,10 +1651,13 @@ def render_tax_regime_panel(employee_id: str) -> None:
 
 
 def render_investment_declaration_panel(employee_id: str) -> None:
+    if _delegate_employee_panel("investment", employee_id):
+        return
     ensure_schema()
     header = get_or_create_header(employee_id)
     locked = _declaration_locked(header)
     st.markdown(f"## 🧾 {FORM_TITLE}")
+    _workflow_nav_buttons("investment")
     st.caption(FORM_SUBTITLE)
     st.warning(DECLARATION_DISCLAIMER)
 
@@ -1596,31 +1682,27 @@ def render_investment_declaration_panel(employee_id: str) -> None:
         if locked:
             st.info("Add item is disabled because the declaration has already been submitted and locked.")
         else:
-            with st.form("add_decl_form"):
-                payload, nav = _render_item_form("add")
-                c1, c2, c3 = st.columns(3)
-                back_clicked = c1.form_submit_button("◀ Back", use_container_width=True, disabled=nav["step"] == 1)
-                next_clicked = c2.form_submit_button("Next ▶", use_container_width=True, disabled=nav["step"] == nav["max_step"])
-                add_clicked = c3.form_submit_button("Add declaration item", type="primary", use_container_width=True)
-                if back_clicked:
-                    _set_form_step("add", nav["step"] - 1)
-                    st.rerun()
-                elif next_clicked:
-                    _set_form_step("add", nav["step"] + 1)
-                    st.rerun()
-                elif add_clicked:
-                    errors = validate_declaration_payload(payload)
-                    if errors:
-                        for err in errors:
-                            st.error(err)
-                    else:
-                        try:
-                            add_declaration_item(employee_id, payload)
-                            _set_form_step("add", 1)
-                            st.success("Declaration item added.")
-                            st.rerun()
-                        except Exception as exc:
-                            st.error(str(exc))
+            payload, nav = _render_item_form("add")
+            c1, c2, c3 = st.columns(3)
+            if c1.button("◀ Back", key="decl_add_back", use_container_width=True, disabled=nav["step"] == 1):
+                _set_form_step("add", nav["step"] - 1)
+                st.rerun()
+            if c2.button("Next ▶", key="decl_add_next", use_container_width=True, disabled=nav["step"] == nav["max_step"]):
+                _set_form_step("add", nav["step"] + 1)
+                st.rerun()
+            if c3.button("Add declaration item", key="decl_add_submit", type="primary", use_container_width=True):
+                errors = validate_declaration_payload(payload)
+                if errors:
+                    for err in errors:
+                        st.error(err)
+                else:
+                    try:
+                        add_declaration_item(employee_id, payload)
+                        _set_form_step("add", 1)
+                        st.success("Declaration item added.")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(str(exc))
 
     items = list_declaration_items(employee_id)
 
@@ -1633,38 +1715,33 @@ def render_investment_declaration_panel(employee_id: str) -> None:
             st.info("No editable items right now.")
         for item in editable:
             with st.expander(f"#{item['id']} • {item.get('section_label') or item['section_code']} • {item['item_name']} • {_money(item.get('declared_amount'))} • {item.get('status')}"):
-                with st.form(f"edit_decl_{item['id']}"):
-                    payload, nav = _render_item_form(f"edit_{item['id']}", item)
-                    c1, c2, c3, c4 = st.columns(4)
-                    back_clicked = c1.form_submit_button("◀ Back", use_container_width=True, disabled=nav["step"] == 1)
-                    next_clicked = c2.form_submit_button("Next ▶", use_container_width=True, disabled=nav["step"] == nav["max_step"])
-                    save_clicked = c3.form_submit_button("💾 Update item", type="primary", use_container_width=True)
-                    del_clicked = c4.form_submit_button("🗑️ Delete item", use_container_width=True)
-                    if back_clicked:
-                        _set_form_step(f"edit_{item['id']}", nav["step"] - 1)
-                        st.rerun()
-                    elif next_clicked:
-                        _set_form_step(f"edit_{item['id']}", nav["step"] + 1)
-                        st.rerun()
-                    elif save_clicked:
-                        errors = validate_declaration_payload(payload)
-                        if errors:
-                            for err in errors:
-                                st.error(err)
-                        else:
-                            try:
-                                update_declaration_item(item["id"], employee_id, payload)
-                                st.success("Declaration item updated.")
-                                st.rerun()
-                            except Exception as exc:
-                                st.error(str(exc))
-                    elif del_clicked:
+                payload, nav = _render_item_form(f"edit_{item['id']}", item)
+                c1, c2, c3, c4 = st.columns(4)
+                if c1.button("◀ Back", key=f"edit_back_{item['id']}", use_container_width=True, disabled=nav["step"] == 1):
+                    _set_form_step(f"edit_{item['id']}", nav["step"] - 1)
+                    st.rerun()
+                if c2.button("Next ▶", key=f"edit_next_{item['id']}", use_container_width=True, disabled=nav["step"] == nav["max_step"]):
+                    _set_form_step(f"edit_{item['id']}", nav["step"] + 1)
+                    st.rerun()
+                if c3.button("💾 Update item", key=f"edit_save_{item['id']}", type="primary", use_container_width=True):
+                    errors = validate_declaration_payload(payload)
+                    if errors:
+                        for err in errors:
+                            st.error(err)
+                    else:
                         try:
-                            delete_declaration_item(item["id"], employee_id)
-                            st.success("Declaration item deleted.")
+                            update_declaration_item(item["id"], employee_id, payload)
+                            st.success("Declaration item updated.")
                             st.rerun()
                         except Exception as exc:
                             st.error(str(exc))
+                if c4.button("🗑️ Delete item", key=f"edit_delete_{item['id']}", use_container_width=True):
+                    try:
+                        delete_declaration_item(item["id"], employee_id)
+                        st.success("Declaration item deleted.")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(str(exc))
 
     if items:
         st.markdown("---")
@@ -1678,24 +1755,29 @@ def render_investment_declaration_panel(employee_id: str) -> None:
         total = float(pd.to_numeric(df["declared_amount"], errors="coerce").fillna(0).sum())
         c1, c2 = st.columns(2)
         c1.metric("Total declared", _money(total))
-        c2.info("Go to **My Declaration** to certify and use **Submit & Lock Declaration**.")
+        c2.info("Go to **My Declaration** to complete the declaration by employee and use **Submit & Lock Declaration**.")
     else:
         st.info("No declaration items yet. Add one above to get started.")
 
 
 def render_proof_submission_panel(employee_id: str) -> None:
-    st.markdown("## 📎 Proof Submission")
-    if not PROOF_SUBMISSION_VISIBLE:
-        st.info("Proof Submission is intentionally hidden for now in this release. Backend support is retained for future activation.")
+    if _delegate_employee_panel("proof_submission", employee_id):
         return
+    st.markdown("## 📎 Proof Submission")
+    _workflow_nav_buttons("proof_submission")
+    st.button("Proof Submission will open in February 2027", disabled=True, use_container_width=True)
+    st.info("This will be open in February 2027 for submission of proofs towards your investment declaration, so please make sure to arrange and upload them.")
 
 
 def render_my_declaration_panel(employee_id: str) -> None:
+    if _delegate_employee_panel("my_declaration", employee_id):
+        return
     ensure_schema()
     header = get_or_create_header(employee_id)
     items = list_declaration_items(employee_id)
     locked = _declaration_locked(header)
     st.markdown(f"## 📊 My Declaration — {FORM_TITLE}")
+    _workflow_nav_buttons("my_declaration")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Regime", header.get("tax_regime") or "Not selected")
     c2.metric("Items", len(items))
@@ -1713,11 +1795,22 @@ def render_my_declaration_panel(employee_id: str) -> None:
         ] if c in df.columns]
         st.dataframe(df[display_cols], use_container_width=True, hide_index=True)
         csv = df.to_csv(index=False).encode("utf-8")
-        st.download_button(
+        xbuf = io.BytesIO()
+        with pd.ExcelWriter(xbuf, engine="openpyxl") as writer:
+            df.to_excel(writer, sheet_name="My Declaration", index=False)
+        xbuf.seek(0)
+        d1, d2 = st.columns(2)
+        d1.download_button(
             "⬇️ Download my declaration (CSV)",
             data=csv,
             file_name=f"{employee_id}_declaration_{CURRENT_FY.replace(' ','_')}.csv",
             mime="text/csv",
+        )
+        d2.download_button(
+            "⬇️ Download my declaration (Excel)",
+            data=xbuf.getvalue(),
+            file_name=f"{employee_id}_declaration_{CURRENT_FY.replace(' ','_')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
     else:
         st.info("No declarations yet.")
@@ -1725,7 +1818,7 @@ def render_my_declaration_panel(employee_id: str) -> None:
     if header.get("tax_regime") == "Old Regime":
         with st.container(border=True):
             st.markdown("### ✅ Submit & Lock Declaration")
-            st.caption("Complete this certification before locking your Form 12BB / 124 declaration.")
+            st.caption("Declaration by employee")
             verification_name = st.text_input(
                 _required_label("Employee name"),
                 value=header.get("declaration_verification_name") or st.session_state.get("employee_name", ""),
@@ -1739,9 +1832,7 @@ def render_my_declaration_panel(employee_id: str) -> None:
                 disabled=locked,
             )
             st.markdown(
-                f"**Certification:** Please certify in the given format only. "
-                f"I, **{verification_name or '..............'}**, son/daughter of **{parent_name or '......................'}**, "
-                f"do hereby certify that the information given in the form is complete and correct."
+                f"I, **{verification_name or '..............'}**, son/daughter of **{parent_name or '......................'}**, do hereby certify that the information given in the form is complete and correct."
             )
             declaration_ok = st.checkbox(
                 "I confirm the above declaration and want to submit & lock Form 12BB / 124.",
@@ -1768,6 +1859,9 @@ def render_my_declaration_panel(employee_id: str) -> None:
 def render_admin_review_queue() -> None:
     ensure_schema()
     st.markdown("## 🛡️ Compliance Review Queue")
+    if not _sarika_only():
+        st.error("Only Sarika Gupta can approve, reject, or reopen declarations in this release.")
+        return
     items = list_review_items()
     if not items:
         st.info("Nothing waiting for review.")
@@ -1793,7 +1887,6 @@ def render_admin_review_queue() -> None:
                 for r in advice["reasons"]:
                     st.markdown(f"- {r}")
 
-            # Proof viewer
             proofs = list_proofs_for_item(item["id"])
             if proofs:
                 with st.expander(f"📁 {len(proofs)} proof file(s)"):
@@ -1816,7 +1909,7 @@ def render_admin_review_queue() -> None:
                 value=int(item.get("approved_amount") or advice["approved_ceiling"] or 0),
                 key=f"appr_{item['id']}",
             )
-            actions = ["UNDER REVIEW", "RESUBMISSION_REQUIRED", "APPROVED", "REJECTED"]
+            actions = ["UNDER REVIEW", "RESUBMISSION_REQUIRED", "APPROVED", "REJECTED", "REOPEN FOR EDIT"]
             default_action = advice["recommended_status"] if advice["recommended_status"] in actions else "UNDER REVIEW"
             action = st.selectbox(
                 "Action", actions,
@@ -1830,8 +1923,12 @@ def render_admin_review_queue() -> None:
                          type="primary"):
                 reviewer_id = st.session_state.get("employee_id", "admin")
                 try:
-                    review_declaration_item(item["id"], approved, action, remarks, reviewer_id)
-                    st.success("Review saved.")
+                    if action == "REOPEN FOR EDIT":
+                        reopen_employee_declaration(item["id"], reviewer_id, remarks)
+                        st.success("Declaration reopened for employee edits.")
+                    else:
+                        review_declaration_item(item["id"], approved, action, remarks, reviewer_id)
+                        st.success("Review saved.")
                     st.rerun()
                 except Exception as exc:
                     st.error(str(exc))
@@ -1839,6 +1936,9 @@ def render_admin_review_queue() -> None:
 
 def render_admin_regime_change_panel() -> None:
     ensure_schema()
+    if not _sarika_only():
+        st.error("Only Sarika Gupta can access this admin workflow in this release.")
+        return
     st.markdown("## 🔄 Regime Change Requests")
     requests = list_regime_change_requests()
     if not requests:
@@ -1888,6 +1988,9 @@ def render_admin_regime_change_panel() -> None:
 
 def render_admin_compliance_reports() -> None:
     ensure_schema()
+    if not _sarika_only():
+        st.error("Only Sarika Gupta can access this admin workflow in this release.")
+        return
     st.markdown("## 📈 Compliance Reports")
 
     dash = compliance_dashboard()
@@ -1959,12 +2062,27 @@ def render_admin_compliance_reports() -> None:
 
     st.markdown("---")
     excel_bytes = export_compliance_excel()
-    st.download_button(
+    d1, d2, d3 = st.columns(3)
+    d1.download_button(
         "⬇️ Download Tax-Team Excel export",
         data=excel_bytes,
         file_name=f"compliance_export_{CURRENT_FY.replace(' ','_')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+    if items:
+        d2.download_button(
+            "⬇️ Declarations CSV",
+            data=pd.DataFrame(items).to_csv(index=False).encode("utf-8"),
+            file_name=f"declarations_{CURRENT_FY.replace(' ','_')}.csv",
+            mime="text/csv",
+        )
+    if all_claims:
+        d3.download_button(
+            "⬇️ Allowances CSV",
+            data=pd.DataFrame(all_claims).to_csv(index=False).encode("utf-8"),
+            file_name=f"allowances_{CURRENT_FY.replace(' ','_')}.csv",
+            mime="text/csv",
+        )
 
     # Audit trail
     with st.expander("🕓 Recent audit trail (last 100 entries)"):
@@ -2460,8 +2578,11 @@ def _render_allowance_form(prefix: str, defaults: Optional[Dict[str, Any]] = Non
 
 
 def render_monthly_allowances_panel(employee_id: str) -> None:
+    if _delegate_employee_panel("monthly_allowances", employee_id):
+        return
     ensure_schema()
     st.markdown("## 🧾 Monthly Allowances")
+    _workflow_nav_buttons("monthly_allowances")
     st.caption(
         "Submit reimbursable expenses (Telephone / Internet, Electricity, Professional "
         "Membership, Software, Skill Development, etc.). Attach a supporting bill / "
@@ -2562,11 +2683,22 @@ def render_monthly_allowances_panel(employee_id: str) -> None:
         ] if c in df.columns]
         st.dataframe(df[display_cols], use_container_width=True, hide_index=True)
         csv = df[display_cols].to_csv(index=False).encode("utf-8")
-        st.download_button(
+        xbuf = io.BytesIO()
+        with pd.ExcelWriter(xbuf, engine="openpyxl") as writer:
+            df[display_cols].to_excel(writer, sheet_name="Monthly Allowances", index=False)
+        xbuf.seek(0)
+        d1, d2 = st.columns(2)
+        d1.download_button(
             "⬇️ Download my allowances (CSV)",
             data=csv,
             file_name=f"{employee_id}_allowances_{CURRENT_FY.replace(' ','_')}.csv",
             mime="text/csv",
+        )
+        d2.download_button(
+            "⬇️ Download my allowances (Excel)",
+            data=xbuf.getvalue(),
+            file_name=f"{employee_id}_allowances_{CURRENT_FY.replace(' ','_')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
     else:
         st.info("No allowance claims yet. Submit your first claim above.")
@@ -2578,6 +2710,9 @@ def render_monthly_allowances_panel(employee_id: str) -> None:
 
 def render_admin_allowance_review_queue() -> None:
     ensure_schema()
+    if not _sarika_only():
+        st.error("Only Sarika Gupta can access this admin workflow in this release.")
+        return
     st.markdown("## 🧾 Allowance Review Queue")
     claims = list_allowance_claims(only_pending=True)
     if not claims:
@@ -2654,6 +2789,9 @@ def render_admin_allowance_review_queue() -> None:
 
 def render_admin_workflow_settings() -> None:
     ensure_schema()
+    if not _sarika_only():
+        st.error("Only Sarika Gupta can access this admin workflow in this release.")
+        return
     st.markdown("## ⚙️ Compliance Workflow Settings")
     st.caption("Controls the allowance submission window for employees.")
 

@@ -1,57 +1,47 @@
-# 🤖 Koenig-Stride – RMS Integration Guide (updated for Form 12BB / 124)
+# Koenig-Stride – RMS Integration Guide (updated for Form 12BB / 124)
 
-This guide explains how to register **Koenig Stride** as an external app inside RMS and what changed in the tax-declaration journey for **Tax Year 2026-27**.
+This guide explains how to register Koenig Stride as an external app inside RMS and what changed in the tax-declaration journey for **Tax Year 2026-27**.
 
 ## What changed in this release
 
-The employee declaration flow now uses **Form 12BB / 124** wording and includes:
+The employee declaration flow now includes:
 
+- Form 12BB / 124 wording
 - new Act-style section labels with earlier section references
-- Next / Back navigation
+- page-level and item-level Back / Next navigation
 - mandatory-field asterisks
+- immediate section-to-item refresh in declaration entry
 - child declaration reminder and required school detail
+- no amount field for Children Declaration
 - HRA monthly-rent based annual-rent calculation
-- Submit & Lock Declaration on **My Declaration**
-- Proof Submission hidden for now
+- Submit & Lock Declaration under **Declaration by employee**
+- Proof Submission shown as an inactive step until **February 2027**
+- admin review / reopen actions limited to **Sarika Gupta** login
 
-## RMS launch modes
+## Launch options
 
 Your existing launch and SSO options remain valid. No protocol change is required for this tax-form release.
 
-### Mode A — Simple external link
-
-```
-https://<your-streamlit-url>/?embed=true
-```
-
-### Mode B — Email launch
+### Email launch
 
 ```
 https://<your-streamlit-url>/?embed=true&email=praveen.chaudhary@koenig-solutions.com
 ```
 
-### Mode C — Signed token launch
+### Signed token launch
 
 ```
 https://<your-streamlit-url>/?embed=true&token=<JWT>
 ```
 
-## Suggested RMS labels
+## Suggested employee menu labels
 
-For employee-facing menus or tiles, use these names:
-
+- **Tax Regime**
 - **Form 12BB / 124 Declaration**
 - **My Declaration**
 - **Monthly Allowances**
+- **Proof Submission**
 
-## Important employee-flow note
+## Proof Submission note
 
-Employees who need to claim **Children Education Allowance** should be guided to add the dedicated child declaration item and complete child-count and school details before using **Submit & Lock Declaration**.
-
-## Proof Submission
-
-The Proof Submission page is intentionally hidden in this release. RMS should not expose or document it for employee use right now.
-
-## SSO reminder
-
-Only `@koenig-solutions.com` identities should be allowed into Koenig Stride. Continue using your existing email or token-based launch setup.
+Keep the Proof Submission step visible but inactive in employee communications. The in-app message states that it will open in **February 2027** for uploading proofs toward the investment declaration.
