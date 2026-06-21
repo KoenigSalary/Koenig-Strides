@@ -286,6 +286,25 @@ def _declaration_locked(header: Optional[Dict[str, Any]]) -> bool:
         str(header.get("workflow_stage") or "").upper() == "DECLARATION_LOCKED"
 
 
+def _sarika_only() -> bool:
+    """Return True only for the Sarika Gupta admin login.
+
+    Matches by employee_id (EMP001) or by the employee_name session value.
+    Falls back to True if Streamlit session state is not available so that
+    server-side scripts and tests are not blocked.
+    """
+    try:
+        employee_name = str(st.session_state.get("employee_name") or "").strip().lower()
+        employee_id = str(st.session_state.get("employee_id") or "").strip().upper()
+    except Exception:
+        return True
+    if employee_id == "EMP001":
+        return True
+    if employee_name == "sarika gupta":
+        return True
+    return False
+
+
 # =====================================================
 # SCHEMA INITIALISATION
 # Auto-creates tables on first call. Idempotent.
