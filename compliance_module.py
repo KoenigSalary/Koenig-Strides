@@ -1365,7 +1365,7 @@ def _set_form_step(prefix: str, step: int) -> None:
     st.session_state[f"nav_step_{prefix}"] = max(1, int(step))
 
 
-def _workflow_panels() -> List[tuple[str, str]]:
+def _workflow_panels():
     return [
         ("tax_regime", "Tax Regime"),
         ("investment", "Form 12BB / 124 Declaration"),
@@ -1376,40 +1376,36 @@ def _workflow_panels() -> List[tuple[str, str]]:
 
 
 def _workflow_nav_buttons(current_key: str) -> None:
-    panels = _workflow_panels()
-    keys = [key for key, _ in panels]
-    labels = {key: label for key, label in panels}
-    idx = keys.index(current_key)
-    prev_key = keys[idx - 1] if idx > 0 else None
-    next_key = keys[idx + 1] if idx < len(keys) - 1 else None
-    st.session_state.setdefault("compliance_target_panel", current_key)
-    c1, c2, c3 = st.columns([1, 2, 1])
-    if c1.button("◀ Back", key=f"page_back_{current_key}", use_container_width=True, disabled=prev_key is None):
-        st.session_state["compliance_target_panel"] = prev_key
-        st.rerun()
-    c2.caption(f"Workflow page: **{labels[current_key]}**")
-    if c3.button("Next ▶", key=f"page_next_{current_key}", use_container_width=True, disabled=next_key is None):
-        st.session_state["compliance_target_panel"] = next_key
-        st.rerun()
+    """Render an informational Back / Next hint row.
+
+    The host app.py owns top-level routing, so we only show a hint of where the
+    user is in the overall flow. We do not try to switch panels from inside the
+    compliance module (that previously caused panels to refuse to render).
+    """
+    try:
+        panels = _workflow_panels()
+        keys = [key for key, _ in panels]
+        labels = {key: label for key, label in panels}
+        if current_key not in keys:
+            return
+        idx = keys.index(current_key)
+        prev_label = labels[keys[idx - 1]] if idx > 0 else None
+        next_label = labels[keys[idx + 1]] if idx < len(keys) - 1 else None
+        bits = []
+        if prev_label:
+            bits.append(f"◀ Previous step: **{prev_label}**")
+        bits.append(f"Current step: **{labels[current_key]}**")
+        if next_label:
+            bits.append(f"Next step: **{next_label}** ▶")
+        st.caption(" • ".join(bits))
+    except Exception:
+        # Never let the nav hint block the actual panel from rendering.
+        return
 
 
 def _delegate_employee_panel(current_key: str, employee_id: str) -> bool:
-    target = st.session_state.get("compliance_target_panel", current_key)
-    if target == current_key:
-        return False
-    mapping = {
-        "tax_regime": render_tax_regime_panel,
-        "investment": render_investment_declaration_panel,
-        "my_declaration": render_my_declaration_panel,
-        "monthly_allowances": render_monthly_allowances_panel,
-        "proof_submission": render_proof_submission_panel,
-    }
-    fn = mapping.get(target)
-    if fn is None:
-        st.session_state["compliance_target_panel"] = current_key
-        return False
-    fn(employee_id)
-    return True
+    """Compatibility shim — never short-circuits the host app's routing now."""
+    return False
 
 
 def _render_item_form(prefix: str, defaults: Optional[Dict[str, Any]] = None) -> Tuple[Dict[str, Any], Dict[str, int]]:
