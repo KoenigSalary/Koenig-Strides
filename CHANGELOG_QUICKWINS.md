@@ -1,39 +1,65 @@
-# Koenig Stride — Form 12BB / 124 Update Changelog
+# Koenig Stride — Quick-Win Roadmap Changelog
 
-This release updates the tax compliance workflow for **Tax Year 2026-27** under the **Income-tax Act, 2025** and **Income-tax Rules, 2026**.
+This release applies the **complete quick-win roadmap** from the code review.
+Database, knowledge file, and assets remain untouched.
 
-## Implemented in this release
+## 🐞 Critical bug fixes
 
-- Form wording updated to **Form 12BB / 124 — Investment Declaration Form**.
-- Tax year wording aligned to **Tax Year 2026-27**.
-- Section labels now show the **new Act-style reference first** and the **earlier section in brackets**.
-- Added **page-level Back / Next workflow navigation** across the employee flow: Tax Regime → Form 12BB / 124 Declaration → My Declaration → Monthly Allowances → Proof Submission.
-- Added **item-level Back / Next navigation** in the declaration form.
-- Mandatory fields now show an **asterisk (`*`)**.
-- **Remarks** remain non-mandatory.
-- Fixed **claim-type / section change refresh** so item options update immediately when the section changes.
-- **Section 80E / Section 129 (Earlier 80E)** restricted to **Self / Spouse / Children**.
-- **HRA annual rent** auto-calculates from **Monthly Rent × 12**.
-- **Section 24(b)** updated to **Interest on home loan** with lender name, lender PAN, lender address, and property occupancy.
-- **Children Declaration** is highlighted; child count and school / institution name are required.
-- **Children Declaration amount entry removed**.
-- **Submit & Lock Declaration** now uses the heading **Declaration by employee**.
-- **Proof Submission** remains visible as an inactive step with the message that it will open in **February 2027**.
-- Removed monthly allowance options: **Skill Development and Certification Programs** and **Other approved expenses as per company policy**.
-- Monthly allowance claims are editable in more statuses, including submitted claims before review begins.
-- Admin reports now support **Excel export** and **CSV export**.
-- Admin approval / rejection / reopen controls are restricted to **Sarika Gupta** login in this release.
+| # | Fix | Where |
+|---|---|---|
+| 1 | `tax_year` NameError on Salary & TDS upload — variable renamed from `financial_year` → `tax_year` | `render_payroll_upload_engine()` |
+| 2 | Ask Sarika chat widget restored — uses `st.chat_input` + `st.chat_message` (input at bottom, history above, like ChatGPT/WhatsApp) | Ask Sarika panel |
+| 3 | Removed 6 redundant `init_payroll_database()` calls inside individual functions. One module-level call now cached via `@st.cache_resource` | `init_payroll_database`, `load_salary_structure_master`, `save_salary_structure_master`, `import_employee_master`, `import_salary_monthly`, `import_tds_monthly`, `render_payroll_data_preview` |
 
-## Certification text
+## 🔒 Security improvements
 
-> I, .............. son/daughter of ...................... do hereby certify that the information given in the form is complete and correct.
+| # | Improvement | Default |
+|---|---|---|
+| 4 | `Welcome@123` auto-reset fallback now disabled by default. Toggle via `st.secrets["ALLOW_DEFAULT_PWD_RESET"] = true` for pilots | `false` (secure) |
+| 5 | Admin password no longer hardcoded — reads from `st.secrets["ADMIN_PASSWORD"]`, falls back to `admin123` only if unset | Move to secrets |
+| 6 | Proof upload allowlist: only `.pdf`, `.png`, `.jpg`, `.jpeg`, `.xlsx`, `.xls` accepted. Max 5 MB. Filename sanitised | Enforced |
+| 9 | Password hashing upgraded from raw SHA-256 to **bcrypt** (12 rounds, salted). Existing SHA-256 hashes in `users.csv` continue to work and are silently re-hashed to bcrypt on next successful login | Auto-upgrade |
+| 12 | New `audit_log` table records every login (success/fail), password update, admin reset, declaration submit/approve/reject/delete. Surfaced in Admin Analytics with CSV export | Logged |
 
-## Updated files
+## 🎨 UX polish
 
-- `compliance_module.py`
-- `CHANGELOG_QUICKWINS.md`
-- `RMS_DEV_HANDOFF.md`
-- `RMS_INTEGRATION_GUIDE.md`
-- `rms_sso_token.py`
-- `requirements.txt`
-- `keep-alive.yml`
+| # | Polish | Where |
+|---|---|---|
+| 8 | Locked panels (Ask Sarika, Declarations, Admin tools) now show a clear info banner instead of silently redirecting to Home | Right pane router |
+| 8 | Home hero `margin-top` reduced from `80px` → `24px` so the welcome card no longer pushes below the fold on smaller screens | Home panel |
+| 8 | Voice Sarika now passes `language="en"` and an Indian-English / tax-jargon prompt to Whisper for far better transcription accuracy on terms like NPS, HRA, Section 80C, Sodexo | `transcribe_audio_with_openai` |
+| 10 | Excel template (`.xlsx`) download button added to Payroll Upload Engine for each upload type. Employee Master panel now has both CSV + XLSX template downloads | Upload panels |
+| 11 | **`render_admin_analytics_dashboard()` implemented** — Users, Declarations (counts + amounts + section breakdown + top employees), Knowledge base, Payroll DB row counts, Storage health warning, recent Audit Log (CSV-exportable) | New panel |
+
+## 📦 New files
+
+- `.streamlit_secrets_example.toml` — copy-paste template for Streamlit Cloud Secrets
+- `CHANGELOG_QUICKWINS.md` — this file
+
+## ⚠️ Still pending (intentionally NOT done in this release)
+
+- **Migrate SQLite + proofs to Postgres + S3** — requires you to choose a host (Supabase / Neon / RDS / S3 / R2). Streamlit Cloud's filesystem **will wipe** your DB on container restart. You can keep using the app as a pilot, but for go-live this is the next blocker.
+- **Split `app.py` into modules** — 3892 lines is still a lot. We can do this in a follow-up release once you confirm the structure (suggestion: `auth/`, `knowledge/`, `payroll/`, `declarations/`, `employees/`, `voice/`, `ui/`).
+
+## How to deploy
+
+1. Replace `app.py` and `requirements.txt` in your GitHub repo with the files from this ZIP.
+2. (Recommended) In Streamlit Cloud → App settings → Secrets, paste:
+   ```toml
+   OPENAI_API_KEY = "sk-..."
+   ADMIN_PASSWORD = "YourStrongAdminPwd#2026"
+   ALLOW_DEFAULT_PWD_RESET = false
+   ```
+3. Push. Streamlit Cloud auto-redeploys in ~1 minute.
+4. Existing employee accounts continue to work. The first time each user logs in, their SHA-256 hash will be silently upgraded to bcrypt.
+
+
+## Hotfixes in this patch
+
+- Removed item-level Back / Next navigation from Add Item and Manage / Resubmit to prevent field-value loss on section-specific mandatory inputs.
+- Removed the separate Claiming for input for Section 126 (Earlier 80D) mediclaim entries.
+- Moved the workflow-step highlight below the Children Education Allowance reminder in the declaration page.
+- Added subtle highlighted backgrounds for declaration remarks and reviewer remarks.
+- Added a Preview and Confirm button on My Declaration that routes the user back to Tax Regime.
+- Reordered the employee sidebar so My Declaration appears directly below Investment Declaration.
+- Fixed Excel download generation in My Declaration by sanitizing timezone-aware / complex values before export.

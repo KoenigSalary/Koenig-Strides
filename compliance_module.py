@@ -24,6 +24,7 @@ Phase B (next ship):
 from __future__ import annotations
 
 import io
+import html
 import json
 import re
 import datetime as dt
@@ -284,25 +285,6 @@ def _declaration_locked(header: Optional[Dict[str, Any]]) -> bool:
         return False
     return str(header.get("status") or "").upper() == "DECLARATION_LOCKED" or \
         str(header.get("workflow_stage") or "").upper() == "DECLARATION_LOCKED"
-
-
-def _sarika_only() -> bool:
-    """Return True only for the Sarika Gupta admin login.
-
-    Matches by employee_id (EMP001) or by the employee_name session value.
-    Falls back to True if Streamlit session state is not available so that
-    server-side scripts and tests are not blocked.
-    """
-    try:
-        employee_name = str(st.session_state.get("employee_name") or "").strip().lower()
-        employee_id = str(st.session_state.get("employee_id") or "").strip().upper()
-    except Exception:
-        return True
-    if employee_id == "EMP001":
-        return True
-    if employee_name == "sarika gupta":
-        return True
-    return False
 
 
 # =====================================================
@@ -1119,11 +1101,11 @@ def export_compliance_excel() -> bytes:
 
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        pd.DataFrame(headers).to_excel(writer, sheet_name="Headers", index=False)
-        pd.DataFrame(items).to_excel(writer, sheet_name="Declarations", index=False)
-        pd.DataFrame(allowances).to_excel(writer, sheet_name="Allowances", index=False)
-        pd.DataFrame(rcrs).to_excel(writer, sheet_name="Regime Changes", index=False)
-        pd.DataFrame(audit).to_excel(writer, sheet_name="Audit", index=False)
+        _excel_safe_df(pd.DataFrame(headers)).to_excel(writer, sheet_name="Headers", index=False)
+        _excel_safe_df(pd.DataFrame(items)).to_excel(writer, sheet_name="Declarations", index=False)
+        _excel_safe_df(pd.DataFrame(allowances)).to_excel(writer, sheet_name="Allowances", index=False)
+        _excel_safe_df(pd.DataFrame(rcrs)).to_excel(writer, sheet_name="Regime Changes", index=False)
+        _excel_safe_df(pd.DataFrame(audit)).to_excel(writer, sheet_name="Audit", index=False)
     buf.seek(0)
     return buf.getvalue()
 
@@ -1189,12 +1171,6 @@ def evaluate_declaration(item: Dict[str, Any]) -> Dict[str, Any]:
             recommended_status = "RESUBMISSION_REQUIRED"
             reasons.append("80DDB requires specialist certificate.")
 
-    if section == "80D" and not item.get("claimant_for"):
-        risk = "MEDIUM" if risk == "LOW" else risk
-        if recommended_status == "APPROVED":
-            recommended_status = "RESUBMISSION_REQUIRED"
-        reasons.append("Section 80D needs claimant type (Self/Family/Parents).")
-
     if section == "CHILD_EDU" and int(item.get("children_count") or 0) <= 0:
         risk = "MEDIUM" if risk == "LOW" else risk
         if recommended_status == "APPROVED":
@@ -1256,9 +1232,6 @@ def validate_declaration_payload(payload: Dict[str, Any]) -> List[str]:
             errors.append("Landlord PAN required when annual rent > ₹1,00,000.")
         if pan and not PAN_REGEX.match(pan):
             errors.append("Landlord PAN format is invalid (e.g., AAAPL1234C).")
-
-    if section == "80D" and not payload.get("claimant_for"):
-        errors.append("Claimant type is mandatory for Section 126 (Earlier 80D).")
 
     if section == "80E":
         claimant = payload.get("claimant_for") or ""
@@ -1345,6 +1318,60 @@ def _state_val(key: str, default: Any = None) -> Any:
     return st.session_state.get(key, default)
 
 
+def _render_remarks_box(label: str, text_value: str) -> None:
+    if not str(text_value or '').strip():
+        return
+    safe_label = html.escape(str(label))
+    safe_text = html.escape(str(text_value))
+    st.markdown(
+        f"<div style='background:#fff7d6;border-left:4px solid #f2c94c;padding:0.7rem 0.9rem;border-radius:0.6rem;margin:0.35rem 0 0.85rem 0;'>"
+        f"<div style='font-size:0.82rem;font-weight:700;color:#7a5a00;margin-bottom:0.2rem;'>{safe_label}</div>"
+        f"<div style='color:#333333;white-space:pre-wrap;'>{safe_text}</div></div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _style_remarks_df(df: pd.DataFrame):
+    remark_cols = [c for c in ('remarks', 'reviewer_remarks') if c in df.columns]
+    if not remark_cols:
+        return df
+    styler = df.style
+    for col in remark_cols:
+        styler = styler.applymap(
+            lambda v: 'background-color:#fff7d6;color:#5f4b00;' if pd.notna(v) and str(v).strip() else '',
+            subset=[col],
+        )
+    return styler
+
+
+def _excel_safe_value(value: Any) -> Any:
+    if isinstance(value, pd.Timestamp):
+        if value.tzinfo is not None:
+            value = value.tz_convert(None)
+        return value.to_pydatetime()
+    if isinstance(value, dt.datetime):
+        if value.tzinfo is not None:
+            value = value.astimezone(dt.timezone.utc).replace(tzinfo=None)
+        return value
+    if isinstance(value, dt.date):
+        return value.isoformat()
+    if isinstance(value, (dict, list, tuple, set)):
+        try:
+            return json.dumps(value, ensure_ascii=False)
+        except Exception:
+            return str(value)
+    return value
+
+
+def _excel_safe_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df.copy()
+    safe_df = df.copy()
+    for col in safe_df.columns:
+        safe_df[col] = safe_df[col].map(_excel_safe_value)
+    return safe_df
+
+
 def _form_step_state(prefix: str, section_code: str) -> Dict[str, int]:
     nav_key = f"nav_step_{prefix}"
     sec_key = f"nav_section_{prefix}"
@@ -1365,7 +1392,7 @@ def _set_form_step(prefix: str, step: int) -> None:
     st.session_state[f"nav_step_{prefix}"] = max(1, int(step))
 
 
-def _workflow_panels():
+def _workflow_panels() -> List[tuple[str, str]]:
     return [
         ("tax_regime", "Tax Regime"),
         ("investment", "Form 12BB / 124 Declaration"),
@@ -1376,36 +1403,43 @@ def _workflow_panels():
 
 
 def _workflow_nav_buttons(current_key: str) -> None:
-    """Render an informational Back / Next hint row.
-
-    The host app.py owns top-level routing, so we only show a hint of where the
-    user is in the overall flow. We do not try to switch panels from inside the
-    compliance module (that previously caused panels to refuse to render).
-    """
-    try:
-        panels = _workflow_panels()
-        keys = [key for key, _ in panels]
-        labels = {key: label for key, label in panels}
-        if current_key not in keys:
-            return
-        idx = keys.index(current_key)
-        prev_label = labels[keys[idx - 1]] if idx > 0 else None
-        next_label = labels[keys[idx + 1]] if idx < len(keys) - 1 else None
-        bits = []
-        if prev_label:
-            bits.append(f"◀ Previous step: **{prev_label}**")
-        bits.append(f"Current step: **{labels[current_key]}**")
-        if next_label:
-            bits.append(f"Next step: **{next_label}** ▶")
-        st.caption(" • ".join(bits))
-    except Exception:
-        # Never let the nav hint block the actual panel from rendering.
-        return
+    panels = _workflow_panels()
+    keys = [key for key, _ in panels]
+    labels = {key: label for key, label in panels}
+    idx = keys.index(current_key)
+    prev_key = keys[idx - 1] if idx > 0 else None
+    next_key = keys[idx + 1] if idx < len(keys) - 1 else None
+    st.session_state.setdefault("compliance_target_panel", current_key)
+    c1, c2, c3 = st.columns([1, 2.6, 1])
+    if c1.button("◀ Previous step", key=f"page_back_{current_key}", use_container_width=True, disabled=prev_key is None):
+        st.session_state["compliance_target_panel"] = prev_key
+        st.rerun()
+    c2.markdown(
+        f"<div style='background:#eef6ff;border:1px solid #c9def7;padding:0.6rem 0.8rem;border-radius:0.75rem;text-align:center;font-weight:600;color:#194b7a;'>◀ Previous step &nbsp; • &nbsp; Current step: {labels[current_key]} &nbsp; • &nbsp; Next step ▶</div>",
+        unsafe_allow_html=True,
+    )
+    if c3.button("Next step ▶", key=f"page_next_{current_key}", use_container_width=True, disabled=next_key is None):
+        st.session_state["compliance_target_panel"] = next_key
+        st.rerun()
 
 
 def _delegate_employee_panel(current_key: str, employee_id: str) -> bool:
-    """Compatibility shim — never short-circuits the host app's routing now."""
-    return False
+    target = st.session_state.get("compliance_target_panel", current_key)
+    if target == current_key:
+        return False
+    mapping = {
+        "tax_regime": render_tax_regime_panel,
+        "investment": render_investment_declaration_panel,
+        "my_declaration": render_my_declaration_panel,
+        "monthly_allowances": render_monthly_allowances_panel,
+        "proof_submission": render_proof_submission_panel,
+    }
+    fn = mapping.get(target)
+    if fn is None:
+        st.session_state["compliance_target_panel"] = current_key
+        return False
+    fn(employee_id)
+    return True
 
 
 def _render_item_form(prefix: str, defaults: Optional[Dict[str, Any]] = None) -> Tuple[Dict[str, Any], Dict[str, int]]:
@@ -1424,8 +1458,7 @@ def _render_item_form(prefix: str, defaults: Optional[Dict[str, Any]] = None) ->
     selected = st.selectbox(_required_label("Section / Claim type"), options, index=default_idx, key=f"sec_{prefix}")
     section_code = _parse_section(selected)
     cfg = SECTION_LOOKUP[section_code]
-    nav = _form_step_state(prefix, section_code)
-    st.caption(f"Step {nav['step']} of {nav['max_step']} • {cfg['display_name']}")
+    st.caption(f"Current section: **{cfg['display_name']}**")
 
     item_key = f"item_{prefix}_{_safe_key(section_code)}"
     amt_key = f"amt_{prefix}"
@@ -1450,106 +1483,100 @@ def _render_item_form(prefix: str, defaults: Optional[Dict[str, Any]] = None) ->
     items = cfg["items"]
     default_item = defaults.get("item_name", items[0]) if defaults.get("item_name") in items else items[0]
 
-    if nav["step"] == 1:
-        c1, c2 = st.columns(2)
-        c1.selectbox(_required_label("Item"), items, index=items.index(default_item), key=item_key)
-        if section_code == "CHILD_EDU":
-            c2.info("No amount entry required for Children Declaration.")
-            st.session_state[amt_key] = 0
-            st.info("Children declaration reminder: if you are claiming Children Education Allowance, please fill the eligible children count and school / institution name in the next step.")
-        else:
-            c2.number_input(
-                _required_label("Declared amount (₹)"), min_value=0, step=1,
-                value=int(defaults.get("declared_amount") or 0), key=amt_key,
-            )
-
-    if nav["step"] == 2:
-        extra_rendered = False
-        if section_code in ("80D", "80DD", "80DDB", "80E"):
-            opts = [""] + (CLAIMANT_OPTIONS_80E if section_code == "80E" else CLAIMANT_OPTIONS)
-            cur = defaults.get("claimant_for", "")
-            st.selectbox(
-                _required_label("Claiming for"), opts,
-                index=opts.index(cur) if cur in opts else 0, key=claimant_key,
-            )
-            extra_rendered = True
-        if section_code in ("80DD", "80DDB"):
-            opts = [""] + RELATION_OPTIONS
-            cur = defaults.get("relation_to_employee", "")
-            st.selectbox(
-                _required_label("Relation to employee"), opts,
-                index=opts.index(cur) if cur in opts else 0, key=relation_key,
-            )
-            extra_rendered = True
-        if section_code == "80DDB":
-            st.text_input(
-                _required_label("Disease name"), value=defaults.get("disease_name", ""), key=disease_key,
-            )
-            extra_rendered = True
-        if section_code == "HRA":
-            c1, c2 = st.columns(2)
-            c1.text_input(_required_label("Landlord name"), value=defaults.get("landlord_name", ""), key=landlord_name_key)
-            cur_rel = defaults.get("landlord_relation", LANDLORD_RELATIONS[0])
-            c2.selectbox(
-                _required_label("Landlord relation"), LANDLORD_RELATIONS,
-                index=LANDLORD_RELATIONS.index(cur_rel) if cur_rel in LANDLORD_RELATIONS else 0,
-                key=landlord_relation_key,
-            )
-            st.text_input(
-                "Landlord PAN (mandatory if annual rent exceeds ₹1,00,000)",
-                value=(defaults.get("landlord_pan") or "").upper(), key=landlord_pan_key,
-            )
-            st.text_area(
-                _required_label("Rental property address"),
-                value=defaults.get("rental_property_address", ""), key=landlord_address_key,
-            )
-            default_monthly_rent = int(meta_defaults.get("monthly_rent") or ((defaults.get("annual_rent") or 0) / 12 if defaults.get("annual_rent") else 0))
-            st.number_input(
-                _required_label("Monthly rent (₹)"), min_value=0, step=1,
-                value=default_monthly_rent, key=monthly_rent_key,
-            )
-            monthly_rent = int(_state_val(monthly_rent_key, default_monthly_rent) or 0)
-            st.metric("Annual rent paid (auto-calculated)", _money(monthly_rent * 12))
-            extra_rendered = True
-        if section_code == "24(b)":
-            c1, c2 = st.columns(2)
-            c1.text_input(_required_label("Name of lender"), value=meta_defaults.get("lender_name", ""), key=lender_name_key)
-            c2.text_input(_required_label("PAN of lender"), value=(meta_defaults.get("lender_pan", "") or "").upper(), key=lender_pan_key)
-            st.text_area(_required_label("Address of lender"), value=meta_defaults.get("lender_address", ""), key=lender_address_key)
-            current_occupancy = meta_defaults.get("property_occupancy", PROPERTY_OCCUPANCY_OPTIONS[0])
-            st.selectbox(
-                _required_label("Property is self occupied or rented"), PROPERTY_OCCUPANCY_OPTIONS,
-                index=PROPERTY_OCCUPANCY_OPTIONS.index(current_occupancy) if current_occupancy in PROPERTY_OCCUPANCY_OPTIONS else 0,
-                key=property_occ_key,
-            )
-            extra_rendered = True
-        if section_code == "CHILD_EDU":
-            st.number_input(
-                _required_label("Eligible children count"), min_value=0, max_value=4, step=1,
-                value=int(defaults.get("children_count") or 0), key=kids_key,
-            )
-            st.text_input(
-                _required_label("School / institution name"), value=meta_defaults.get("school_name", ""), key=school_key,
-            )
-            extra_rendered = True
-        if section_code == "OTHER_VIA":
-            st.text_input(
-                _required_label("Section reference"), value=meta_defaults.get("section_reference", ""), key=other_section_key,
-                placeholder="Example: Section 131 / relevant Chapter VIII-A clause",
-            )
-            extra_rendered = True
-        if not extra_rendered:
-            st.info("No additional claim-specific fields for this section. Use Next to review proof details.")
-
-    if nav["step"] == nav["max_step"]:
-        st.text_input(
-            _required_label("Expected proof"),
-            value=defaults.get("expected_proof") or cfg["expected_proof"], key=proof_key,
+    c1, c2 = st.columns(2)
+    c1.selectbox(_required_label("Item"), items, index=items.index(default_item), key=item_key)
+    if section_code == "CHILD_EDU":
+        c2.info("No amount entry required for Children Declaration.")
+        st.session_state[amt_key] = 0
+        st.info("Children declaration reminder: if you are claiming Children Education Allowance, please fill the eligible children count and school / institution name below.")
+    else:
+        c2.number_input(
+            _required_label("Declared amount (₹)"), min_value=0, step=1,
+            value=int(defaults.get("declared_amount") or 0), key=amt_key,
         )
-        if section_code != "24(b)":
-            st.text_area("Remarks", value=defaults.get("remarks", ""), key=remarks_key)
-        else:
-            st.info("Remarks are not required for Interest on home loan in this release.")
+
+    # Claim-specific inputs
+    if section_code in ("80DD", "80DDB", "80E"):
+        opts = [""] + (CLAIMANT_OPTIONS_80E if section_code == "80E" else CLAIMANT_OPTIONS)
+        cur = defaults.get("claimant_for", "")
+        st.selectbox(
+            _required_label("Claiming for"), opts,
+            index=opts.index(cur) if cur in opts else 0, key=claimant_key,
+        )
+
+    if section_code in ("80DD", "80DDB"):
+        opts = [""] + RELATION_OPTIONS
+        cur = defaults.get("relation_to_employee", "")
+        st.selectbox(
+            _required_label("Relation to employee"), opts,
+            index=opts.index(cur) if cur in opts else 0, key=relation_key,
+        )
+
+    if section_code == "80DDB":
+        st.text_input(
+            _required_label("Disease name"), value=defaults.get("disease_name", ""), key=disease_key,
+        )
+
+    if section_code == "HRA":
+        c1, c2 = st.columns(2)
+        c1.text_input(_required_label("Landlord name"), value=defaults.get("landlord_name", ""), key=landlord_name_key)
+        cur_rel = defaults.get("landlord_relation", LANDLORD_RELATIONS[0])
+        c2.selectbox(
+            _required_label("Landlord relation"), LANDLORD_RELATIONS,
+            index=LANDLORD_RELATIONS.index(cur_rel) if cur_rel in LANDLORD_RELATIONS else 0,
+            key=landlord_relation_key,
+        )
+        st.text_input(
+            "Landlord PAN (mandatory if annual rent exceeds ₹1,00,000)",
+            value=(defaults.get("landlord_pan") or "").upper(), key=landlord_pan_key,
+        )
+        st.text_area(
+            _required_label("Rental property address"),
+            value=defaults.get("rental_property_address", ""), key=landlord_address_key,
+        )
+        default_monthly_rent = int(meta_defaults.get("monthly_rent") or ((defaults.get("annual_rent") or 0) / 12 if defaults.get("annual_rent") else 0))
+        st.number_input(
+            _required_label("Monthly rent (₹)"), min_value=0, step=1,
+            value=default_monthly_rent, key=monthly_rent_key,
+        )
+        monthly_rent = int(_state_val(monthly_rent_key, default_monthly_rent) or 0)
+        st.metric("Annual rent paid (auto-calculated)", _money(monthly_rent * 12))
+
+    if section_code == "24(b)":
+        c1, c2 = st.columns(2)
+        c1.text_input(_required_label("Name of lender"), value=meta_defaults.get("lender_name", ""), key=lender_name_key)
+        c2.text_input(_required_label("PAN of lender"), value=(meta_defaults.get("lender_pan", "") or "").upper(), key=lender_pan_key)
+        st.text_area(_required_label("Address of lender"), value=meta_defaults.get("lender_address", ""), key=lender_address_key)
+        current_occupancy = meta_defaults.get("property_occupancy", PROPERTY_OCCUPANCY_OPTIONS[0])
+        st.selectbox(
+            _required_label("Property is self occupied or rented"), PROPERTY_OCCUPANCY_OPTIONS,
+            index=PROPERTY_OCCUPANCY_OPTIONS.index(current_occupancy) if current_occupancy in PROPERTY_OCCUPANCY_OPTIONS else 0,
+            key=property_occ_key,
+        )
+
+    if section_code == "CHILD_EDU":
+        st.number_input(
+            _required_label("Eligible children count"), min_value=0, max_value=4, step=1,
+            value=int(defaults.get("children_count") or 0), key=kids_key,
+        )
+        st.text_input(
+            _required_label("School / institution name"), value=meta_defaults.get("school_name", ""), key=school_key,
+        )
+
+    if section_code == "OTHER_VIA":
+        st.text_input(
+            _required_label("Section reference"), value=meta_defaults.get("section_reference", ""), key=other_section_key,
+            placeholder="Example: Section 131 / relevant Chapter VIII-A clause",
+        )
+
+    st.text_input(
+        _required_label("Expected proof"),
+        value=defaults.get("expected_proof") or cfg["expected_proof"], key=proof_key,
+    )
+    if section_code != "24(b)":
+        st.text_area("Remarks", value=defaults.get("remarks", ""), key=remarks_key)
+    else:
+        st.info("Remarks are not required for Interest on home loan in this release.")
 
     payload: Dict[str, Any] = {
         "section_code": section_code,
@@ -1592,7 +1619,7 @@ def _render_item_form(prefix: str, defaults: Optional[Dict[str, Any]] = None) ->
     if section_code == "OTHER_VIA":
         payload["metadata"]["section_reference"] = _state_val(other_section_key, meta_defaults.get("section_reference", ""))
 
-    return payload, nav
+    return payload, {"step": 1, "max_step": 1}
 
 
 def render_tax_regime_panel(employee_id: str) -> None:
@@ -1672,7 +1699,6 @@ def render_investment_declaration_panel(employee_id: str) -> None:
     header = get_or_create_header(employee_id)
     locked = _declaration_locked(header)
     st.markdown(f"## 🧾 {FORM_TITLE}")
-    _workflow_nav_buttons("investment")
     st.caption(FORM_SUBTITLE)
     st.warning(DECLARATION_DISCLAIMER)
 
@@ -1690,6 +1716,7 @@ def render_investment_declaration_panel(employee_id: str) -> None:
         "Children declaration highlight: if you want to claim **Children Education Allowance**, "
         "please add the dedicated **Form No. 124 — Children Declaration / Children Education Allowance** item and complete the children count + school details."
     )
+    _workflow_nav_buttons("investment")
 
     add_tab, manage_tab = st.tabs(["➕ Add Item", "✏️ Manage / Resubmit"])
 
@@ -1697,15 +1724,8 @@ def render_investment_declaration_panel(employee_id: str) -> None:
         if locked:
             st.info("Add item is disabled because the declaration has already been submitted and locked.")
         else:
-            payload, nav = _render_item_form("add")
-            c1, c2, c3 = st.columns(3)
-            if c1.button("◀ Back", key="decl_add_back", use_container_width=True, disabled=nav["step"] == 1):
-                _set_form_step("add", nav["step"] - 1)
-                st.rerun()
-            if c2.button("Next ▶", key="decl_add_next", use_container_width=True, disabled=nav["step"] == nav["max_step"]):
-                _set_form_step("add", nav["step"] + 1)
-                st.rerun()
-            if c3.button("Add declaration item", key="decl_add_submit", type="primary", use_container_width=True):
+            payload, _nav = _render_item_form("add")
+            if st.button("Add declaration item", key="decl_add_submit", type="primary", use_container_width=True):
                 errors = validate_declaration_payload(payload)
                 if errors:
                     for err in errors:
@@ -1713,7 +1733,6 @@ def render_investment_declaration_panel(employee_id: str) -> None:
                 else:
                     try:
                         add_declaration_item(employee_id, payload)
-                        _set_form_step("add", 1)
                         st.success("Declaration item added.")
                         st.rerun()
                     except Exception as exc:
@@ -1730,15 +1749,9 @@ def render_investment_declaration_panel(employee_id: str) -> None:
             st.info("No editable items right now.")
         for item in editable:
             with st.expander(f"#{item['id']} • {item.get('section_label') or item['section_code']} • {item['item_name']} • {_money(item.get('declared_amount'))} • {item.get('status')}"):
-                payload, nav = _render_item_form(f"edit_{item['id']}", item)
-                c1, c2, c3, c4 = st.columns(4)
-                if c1.button("◀ Back", key=f"edit_back_{item['id']}", use_container_width=True, disabled=nav["step"] == 1):
-                    _set_form_step(f"edit_{item['id']}", nav["step"] - 1)
-                    st.rerun()
-                if c2.button("Next ▶", key=f"edit_next_{item['id']}", use_container_width=True, disabled=nav["step"] == nav["max_step"]):
-                    _set_form_step(f"edit_{item['id']}", nav["step"] + 1)
-                    st.rerun()
-                if c3.button("💾 Update item", key=f"edit_save_{item['id']}", type="primary", use_container_width=True):
+                payload, _nav = _render_item_form(f"edit_{item['id']}", item)
+                c1, c2 = st.columns(2)
+                if c1.button("💾 Update item", key=f"edit_save_{item['id']}", type="primary", use_container_width=True):
                     errors = validate_declaration_payload(payload)
                     if errors:
                         for err in errors:
@@ -1750,13 +1763,15 @@ def render_investment_declaration_panel(employee_id: str) -> None:
                             st.rerun()
                         except Exception as exc:
                             st.error(str(exc))
-                if c4.button("🗑️ Delete item", key=f"edit_delete_{item['id']}", use_container_width=True):
+                if c2.button("🗑️ Delete item", key=f"edit_delete_{item['id']}", use_container_width=True):
                     try:
                         delete_declaration_item(item["id"], employee_id)
                         st.success("Declaration item deleted.")
                         st.rerun()
                     except Exception as exc:
                         st.error(str(exc))
+                _render_remarks_box("Employee remarks", item.get("remarks") or "")
+                _render_remarks_box("Reviewer remarks", item.get("reviewer_remarks") or "")
 
     if items:
         st.markdown("---")
@@ -1764,13 +1779,14 @@ def render_investment_declaration_panel(employee_id: str) -> None:
         df = pd.DataFrame(items)
         display_cols = [c for c in [
             "id", "section_label", "section_code", "item_name", "declared_amount",
-            "children_count", "actual_amount", "approved_amount", "status", "proof_count", "reviewer_remarks",
+            "children_count", "remarks", "actual_amount", "approved_amount", "status", "proof_count", "reviewer_remarks",
         ] if c in df.columns]
-        st.dataframe(df[display_cols], use_container_width=True, hide_index=True)
+        display_df = df[display_cols].copy()
+        st.dataframe(_style_remarks_df(display_df), use_container_width=True, hide_index=True)
         total = float(pd.to_numeric(df["declared_amount"], errors="coerce").fillna(0).sum())
         c1, c2 = st.columns(2)
         c1.metric("Total declared", _money(total))
-        c2.info("Go to **My Declaration** to complete the declaration by employee and use **Submit & Lock Declaration**.")
+        c2.info("Go to **My Declaration** to complete the declaration by employee and use **Preview and Confirm** or **Submit & Lock Declaration**.")
     else:
         st.info("No declaration items yet. Add one above to get started.")
 
@@ -1806,15 +1822,17 @@ def render_my_declaration_panel(employee_id: str) -> None:
         df = pd.DataFrame(items)
         display_cols = [c for c in [
             "id", "section_label", "section_code", "item_name", "declared_amount", "children_count",
-            "actual_amount", "approved_amount", "status", "proof_count", "reviewer_remarks",
+            "remarks", "actual_amount", "approved_amount", "status", "proof_count", "reviewer_remarks",
         ] if c in df.columns]
-        st.dataframe(df[display_cols], use_container_width=True, hide_index=True)
+        display_df = df[display_cols].copy()
+        st.dataframe(_style_remarks_df(display_df), use_container_width=True, hide_index=True)
         csv = df.to_csv(index=False).encode("utf-8")
+        export_df = _excel_safe_df(df)
         xbuf = io.BytesIO()
         with pd.ExcelWriter(xbuf, engine="openpyxl") as writer:
-            df.to_excel(writer, sheet_name="My Declaration", index=False)
+            export_df.to_excel(writer, sheet_name="My Declaration", index=False)
         xbuf.seek(0)
-        d1, d2 = st.columns(2)
+        d1, d2, d3 = st.columns(3)
         d1.download_button(
             "⬇️ Download my declaration (CSV)",
             data=csv,
@@ -1827,6 +1845,9 @@ def render_my_declaration_panel(employee_id: str) -> None:
             file_name=f"{employee_id}_declaration_{CURRENT_FY.replace(' ','_')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
+        if d3.button("🔎 Preview and Confirm", use_container_width=True):
+            st.session_state["compliance_target_panel"] = "tax_regime"
+            st.rerun()
     else:
         st.info("No declarations yet.")
 
@@ -2700,7 +2721,7 @@ def render_monthly_allowances_panel(employee_id: str) -> None:
         csv = df[display_cols].to_csv(index=False).encode("utf-8")
         xbuf = io.BytesIO()
         with pd.ExcelWriter(xbuf, engine="openpyxl") as writer:
-            df[display_cols].to_excel(writer, sheet_name="Monthly Allowances", index=False)
+            _excel_safe_df(df[display_cols]).to_excel(writer, sheet_name="Monthly Allowances", index=False)
         xbuf.seek(0)
         d1, d2 = st.columns(2)
         d1.download_button(

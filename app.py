@@ -3666,9 +3666,9 @@ with left:
             else:
                 panel_button("📋 Tax Regime", "Compliance Tax Regime")
                 panel_button("🧾 Investment Declaration", "Compliance Investment Declaration")
-                panel_button("📎 Proof Submission", "Compliance Proof Submission")
-                panel_button("💰 Monthly Allowances", "Compliance Monthly Allowances")
                 panel_button("📊 My Declaration", "Compliance My Declaration")
+                panel_button("💰 Monthly Allowances", "Compliance Monthly Allowances")
+                panel_button("📎 Proof Submission", "Compliance Proof Submission")
 
     # ---- Admin Mode toggle (sidebar bottom) ------------------------------
     # Allows an SSO'd Employee to elevate to Admin within the SAME session
