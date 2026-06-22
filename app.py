@@ -69,12 +69,15 @@ def _init_compliance_once():
         # Don't block the whole app if compliance init fails.
         st.session_state["_compliance_init_error"] = str(exc)
 
+# STATIC-LOOKUP-CACHE-V1
+@st.cache_data(ttl=3600, show_spinner=False)
 def _get_database_url():
     try:
         return st.secrets.get("DATABASE_URL", "") or ""
     except Exception:
         return ""
 
+@st.cache_data(ttl=3600, show_spinner=False)
 def _using_postgres():
     return _PSYCOPG2_AVAILABLE and bool(_get_database_url())
 

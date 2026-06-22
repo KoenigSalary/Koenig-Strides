@@ -209,8 +209,8 @@ def init(
     _db_ctx["write_audit_log"] = write_audit_log_fn or (lambda *a, **k: None)
 
 
-def _get_conn():
-    """Return a fresh DB connection (Postgres if configured, else SQLite)."""
+def _open_new_conn():
+    """Open a brand-new DB connection (used by the pool)."""
     if _db_ctx.get("using_postgres", lambda: False)():
         import psycopg2
         import psycopg2.extras
@@ -226,6 +226,123 @@ def _get_conn():
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     return conn
+
+
+# # CONN-POOL-V1
+# Per-process connection pool. Streamlit reruns the whole script on every
+# interaction; reopening a Supabase TLS connection each rerun was the main
+# source of perceived slowness. st.cache_resource holds a shared pool so
+# reads reuse an existing socket whenever possible.
+try:
+    import streamlit as _st_for_pool  # noqa: F401
+    _STREAMLIT_AVAILABLE_FOR_POOL = True
+except Exception:
+    _STREAMLIT_AVAILABLE_FOR_POOL = False
+
+
+class _ConnPool:
+    def __init__(self, max_size: int = 2):
+        self._max = max_size
+        self._idle = []  # type: list
+
+    def acquire(self):
+        while self._idle:
+            conn = self._idle.pop()
+            if _conn_is_alive(conn):
+                return conn
+            try:
+                conn.close()
+            except Exception:
+                pass
+        return _open_new_conn()
+
+    def release(self, conn):
+        if conn is None:
+            return
+        try:
+            if not _conn_is_alive(conn):
+                conn.close()
+                return
+        except Exception:
+            return
+        if len(self._idle) < self._max:
+            self._idle.append(conn)
+        else:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def close_all(self):
+        while self._idle:
+            try:
+                self._idle.pop().close()
+            except Exception:
+                pass
+
+
+def _conn_is_alive(conn) -> bool:
+    try:
+        if hasattr(conn, "closed") and conn.closed:
+            return False
+        cur = conn.cursor()
+        cur.execute("SELECT 1")
+        cur.fetchone()
+        cur.close()
+        return True
+    except Exception:
+        return False
+
+
+if _STREAMLIT_AVAILABLE_FOR_POOL:
+    import streamlit as _st_pool  # noqa: E402
+
+    @_st_pool.cache_resource(show_spinner=False)
+    def _get_pool() -> _ConnPool:
+        return _ConnPool(max_size=2)
+else:
+    _global_pool_singleton = _ConnPool(max_size=2)
+
+    def _get_pool() -> _ConnPool:  # type: ignore[no-redef]
+        return _global_pool_singleton
+
+
+class _PooledConn:
+    """Lightweight wrapper exposing the conn API while returning to pool on close."""
+
+    def __init__(self, pool: _ConnPool):
+        self._pool = pool
+        self._conn = pool.acquire()
+        self._closed = False
+
+    def cursor(self, *a, **kw):
+        return self._conn.cursor(*a, **kw)
+
+    def commit(self):
+        return self._conn.commit()
+
+    def rollback(self):
+        return self._conn.rollback()
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._pool.release(self._conn)
+        except Exception:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+
+    def __getattr__(self, item):
+        return getattr(self._conn, item)
+
+
+def _get_conn():
+    """Return a pooled DB connection. .close() releases it back to the pool."""
+    return _PooledConn(_get_pool())
 
 
 def _ph() -> str:

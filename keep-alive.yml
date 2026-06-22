@@ -1,13 +1,7 @@
-name: Keep Streamlit App Awake
-
-on:
-  schedule:
-    - cron: "*/20 * * * *"
-  workflow_dispatch:
-
-jobs:
-  keep-alive:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Ping Streamlit app
-        run: curl -L --fail https://YOUR-APP-NAME.streamlit.app
+# This file has moved.
+#
+# The active GitHub Actions workflow now lives at:
+#   .github/workflows/keep-alive.yml
+#
+# Edit the APP_URL value in that file (or set a repo variable APP_URL)
+# to point at your deployed Streamlit Cloud URL.
