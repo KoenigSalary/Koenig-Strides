@@ -1332,16 +1332,33 @@ def _render_remarks_box(label: str, text_value: str) -> None:
 
 
 def _style_remarks_df(df: pd.DataFrame):
+    """Apply a soft highlight background to remark columns.
+
+    Uses ``Styler.map`` on pandas >= 2.1 and falls back to ``Styler.applymap``
+    on older releases. If styling fails for any reason, returns the plain
+    DataFrame so the UI still renders.
+    """
     remark_cols = [c for c in ('remarks', 'reviewer_remarks') if c in df.columns]
     if not remark_cols:
         return df
-    styler = df.style
-    for col in remark_cols:
-        styler = styler.applymap(
-            lambda v: 'background-color:#fff7d6;color:#5f4b00;' if pd.notna(v) and str(v).strip() else '',
-            subset=[col],
-        )
-    return styler
+    try:
+        def _highlight(value):
+            if pd.notna(value) and str(value).strip():
+                return 'background-color:#fff7d6;color:#5f4b00;'
+            return ''
+
+        styler = df.style
+        style_fn = getattr(styler, 'map', None) or getattr(styler, 'applymap', None)
+        if style_fn is None:
+            return df
+        for col in remark_cols:
+            styler = style_fn(_highlight, subset=[col])
+            style_fn = getattr(styler, 'map', None) or getattr(styler, 'applymap', None)
+            if style_fn is None:
+                break
+        return styler
+    except Exception:
+        return df
 
 
 def _excel_safe_value(value: Any) -> Any:
