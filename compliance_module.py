@@ -404,6 +404,20 @@ def _declaration_locked(header: Optional[Dict[str, Any]]) -> bool:
         str(header.get("workflow_stage") or "").upper() == "DECLARATION_LOCKED"
 
 
+def _sarika_only() -> bool:
+    """Backward-compatible admin guard.
+
+    Some admin compliance panels still call a legacy helper named
+    `_sarika_only()`. During the merge, those call sites remained but the
+    helper definition was omitted, causing a NameError in Admin Mode.
+
+    Current Strides behavior is broader than the old hard-coded restriction:
+    any user already in Admin Mode / with role="Admin" should be allowed to
+    access these admin compliance workflows. We keep the legacy function name
+    so the existing call sites continue to work without invasive edits.
+    """
+    return str(st.session_state.get("role", "")).strip().lower() == "admin"
+
 
 # =====================================================
 # Streamlit caching layer (perf)
@@ -2156,7 +2170,7 @@ def render_admin_review_queue() -> None:
     ensure_schema()
     st.markdown("## 🛡️ Compliance Review Queue")
     if not _sarika_only():
-        st.error("Only Sarika Gupta can approve, reject, or reopen declarations in this release.")
+        st.error("Only users in Admin Mode can approve, reject, or reopen declarations in this release.")
         return
     items = list_review_items()
     if not items:
@@ -2233,7 +2247,7 @@ def render_admin_review_queue() -> None:
 def render_admin_regime_change_panel() -> None:
     ensure_schema()
     if not _sarika_only():
-        st.error("Only Sarika Gupta can access this admin workflow in this release.")
+        st.error("Only users in Admin Mode can access this admin workflow in this release.")
         return
     st.markdown("## 🔄 Regime Change Requests")
     requests = list_regime_change_requests()
@@ -2285,7 +2299,7 @@ def render_admin_regime_change_panel() -> None:
 def render_admin_compliance_reports() -> None:
     ensure_schema()
     if not _sarika_only():
-        st.error("Only Sarika Gupta can access this admin workflow in this release.")
+        st.error("Only users in Admin Mode can access this admin workflow in this release.")
         return
     st.markdown("## 📈 Compliance Reports")
 
@@ -3007,7 +3021,7 @@ def render_monthly_allowances_panel(employee_id: str) -> None:
 def render_admin_allowance_review_queue() -> None:
     ensure_schema()
     if not _sarika_only():
-        st.error("Only Sarika Gupta can access this admin workflow in this release.")
+        st.error("Only users in Admin Mode can access this admin workflow in this release.")
         return
     st.markdown("## 🧾 Allowance Review Queue")
     claims = list_allowance_claims(only_pending=True)
@@ -3086,7 +3100,7 @@ def render_admin_allowance_review_queue() -> None:
 def render_admin_workflow_settings() -> None:
     ensure_schema()
     if not _sarika_only():
-        st.error("Only Sarika Gupta can access this admin workflow in this release.")
+        st.error("Only users in Admin Mode can access this admin workflow in this release.")
         return
     st.markdown("## ⚙️ Compliance Workflow Settings")
     st.caption("Controls the allowance submission window for employees.")
