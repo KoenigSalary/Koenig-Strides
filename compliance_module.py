@@ -1100,11 +1100,69 @@ def decide_regime_change_request(request_id: int, decision: str,
                 WHERE id={_ph()}""",
                 (req["requested_regime"], next_stage, _now(), req["header_id"]),
             )
+            if req["requested_regime"] == "New Regime":
+                cur.execute(
+                    f"""UPDATE compliance_declaration_items
+                    SET status='OBSOLETE_NEW_REGIME',
+                        reviewer_remarks=
+                            CASE
+                                WHEN reviewer_remarks IS NULL OR reviewer_remarks='' THEN 'Marked obsolete after approved switch to New Regime'
+                                ELSE reviewer_remarks || ' | Marked obsolete after approved switch to New Regime'
+                            END,
+                        updated_on={_ph()}
+                    WHERE header_id={_ph()} AND employee_id={_ph()} AND financial_year={_ph()}""",
+                    (_now(), req["header_id"], req["employee_id"], req["financial_year"]),
+                )
+                cur.execute(
+                    f"""UPDATE compliance_proof_uploads
+                    SET review_status='OBSOLETE_NEW_REGIME'
+                    WHERE employee_id={_ph()} AND item_id IN (
+                        SELECT id FROM compliance_declaration_items
+                        WHERE header_id={_ph()} AND employee_id={_ph()} AND financial_year={_ph()}
+                    )""",
+                    (req["employee_id"], req["header_id"], req["employee_id"], req["financial_year"]),
+                )
         conn.commit()
     finally:
         cur.close()
         conn.close()
     _audit(reviewer_id, "DECIDE_REGIME_CHANGE", "regime_change_request", str(request_id), decision)
+
+
+def delete_employee_compliance_test_data(employee_id: str, reviewer_id: str, fy: str = CURRENT_FY) -> None:
+    """Admin cleanup for testing records of a specific employee in the current FY."""
+    employee_id = (employee_id or '').strip()
+    if not employee_id:
+        raise ValueError('Employee ID is required.')
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            f"DELETE FROM compliance_proof_uploads WHERE employee_id={_ph()}",
+            (employee_id,),
+        )
+        cur.execute(
+            f"DELETE FROM compliance_declaration_items WHERE employee_id={_ph()} AND financial_year={_ph()}",
+            (employee_id, fy),
+        )
+        cur.execute(
+            f"DELETE FROM compliance_regime_change_requests WHERE employee_id={_ph()} AND financial_year={_ph()}",
+            (employee_id, fy),
+        )
+        cur.execute(
+            f"DELETE FROM compliance_allowance_claims WHERE employee_id={_ph()} AND financial_year={_ph()}",
+            (employee_id, fy),
+        )
+        cur.execute(
+            f"DELETE FROM compliance_declaration_header WHERE employee_id={_ph()} AND financial_year={_ph()}",
+            (employee_id, fy),
+        )
+        conn.commit()
+    finally:
+        cur.close()
+        conn.close()
+    _audit(reviewer_id, 'DELETE_TEST_COMPLIANCE_DATA', 'employee', employee_id, fy)
+    _compliance_bust_cache()
 
 
 # =====================================================
@@ -1120,7 +1178,9 @@ def _uncached_list_review_items() -> List[Dict[str, Any]]:
             f"""SELECT di.*,
                 (SELECT COUNT(*) FROM compliance_proof_uploads pu WHERE pu.item_id = di.id) AS proof_count
             FROM compliance_declaration_items di
+            JOIN compliance_declaration_header dh ON dh.id = di.header_id
             WHERE di.financial_year={_ph()}
+              AND COALESCE(dh.tax_regime,'') <> 'New Regime'
               AND di.status IN ('SUBMITTED','PROOF_SUBMITTED','RESUBMITTED','UNDER REVIEW')
             ORDER BY di.updated_on DESC, di.id DESC""",
             (CURRENT_FY,),
@@ -1236,9 +1296,24 @@ def export_compliance_excel() -> bytes:
         cur.execute(f"SELECT * FROM compliance_declaration_header WHERE financial_year={_ph()}",
                     (CURRENT_FY,))
         headers = _rows_to_dicts(cur)
-        cur.execute(f"SELECT * FROM compliance_declaration_items WHERE financial_year={_ph()}",
-                    (CURRENT_FY,))
+        cur.execute(
+            f"""SELECT di.*
+                FROM compliance_declaration_items di
+                LEFT JOIN compliance_declaration_header dh ON dh.id = di.header_id
+                WHERE di.financial_year={_ph()}
+                  AND (di.status <> 'OBSOLETE_NEW_REGIME' AND COALESCE(dh.tax_regime,'') <> 'New Regime')""",
+            (CURRENT_FY,),
+        )
         items = _rows_to_dicts(cur)
+        cur.execute(
+            f"""SELECT di.*
+                FROM compliance_declaration_items di
+                LEFT JOIN compliance_declaration_header dh ON dh.id = di.header_id
+                WHERE di.financial_year={_ph()}
+                  AND (di.status = 'OBSOLETE_NEW_REGIME' OR COALESCE(dh.tax_regime,'') = 'New Regime')""",
+            (CURRENT_FY,),
+        )
+        obsolete_items = _rows_to_dicts(cur)
         cur.execute(f"SELECT * FROM compliance_regime_change_requests WHERE financial_year={_ph()}",
                     (CURRENT_FY,))
         rcrs = _rows_to_dicts(cur)
@@ -1262,6 +1337,7 @@ def export_compliance_excel() -> bytes:
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         _excel_safe_df(pd.DataFrame(headers)).to_excel(writer, sheet_name="Headers", index=False)
         _excel_safe_df(pd.DataFrame(items)).to_excel(writer, sheet_name="Declarations", index=False)
+        _excel_safe_df(pd.DataFrame(obsolete_items)).to_excel(writer, sheet_name="Obsolete Declarations", index=False)
         _excel_safe_df(pd.DataFrame(allowances)).to_excel(writer, sheet_name="Allowances", index=False)
         _excel_safe_df(pd.DataFrame(rcrs)).to_excel(writer, sheet_name="Regime Changes", index=False)
         _excel_safe_df(pd.DataFrame(audit)).to_excel(writer, sheet_name="Audit", index=False)
@@ -3135,6 +3211,33 @@ def render_admin_workflow_settings() -> None:
                 st.rerun()
             except Exception as exc:
                 st.error(str(exc))
+
+    st.markdown("---")
+    with st.container(border=True):
+        st.markdown("### 🗑️ Delete testing entry")
+        st.caption("Admin-only cleanup for test data already entered by any employee in the current tax year.")
+        delete_emp_id = st.text_input(
+            "Employee ID to delete test data for",
+            key="delete_test_emp_id",
+            placeholder="Enter employee ID exactly as stored",
+        )
+        delete_confirm = st.checkbox(
+            "I understand this will permanently delete the selected employee's compliance test data for the current tax year.",
+            key="delete_test_confirm",
+        )
+        if st.button("Delete testing entry", key="delete_testing_entry_btn"):
+            if not delete_emp_id.strip():
+                st.error("Please enter an employee ID.")
+            elif not delete_confirm:
+                st.error("Please confirm before deleting.")
+            else:
+                reviewer_id = st.session_state.get("employee_id", "admin")
+                try:
+                    delete_employee_compliance_test_data(delete_emp_id.strip(), reviewer_id)
+                    st.success(f"Deleted current tax-year compliance test data for {delete_emp_id.strip()}.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(str(exc))
 
     st.markdown("---")
     st.markdown("### Current effective status")
