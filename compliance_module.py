@@ -1905,6 +1905,64 @@ def render_investment_declaration_panel(employee_id: str) -> None:
     st.caption(FORM_SUBTITLE)
     st.warning(DECLARATION_DISCLAIMER)
 
+    # First-time guide — expanded by default the first time the user opens the
+    # panel, collapsible thereafter. The flag is per session so seasoned users
+    # don't see it open every single time.
+    _guide_open_default = not st.session_state.get("_investment_guide_seen", False)
+    with st.expander("📘 How to fill this declaration — step-by-step guide", expanded=_guide_open_default):
+        st.markdown(
+            """
+            ### How to Submit Investment Declaration
+
+            **Step 1:** Log in to **RMS** and navigate to **Koenig Strides**.
+
+            **Step 2:** Select your preferred **Tax Regime** (Old Regime or New Regime).
+
+            **Step 3:** If you select the **Old Tax Regime**, proceed to the **Investment Declaration** section. Select each applicable category one by one, enter the required details accurately, and click **Add** to save the information for that category.
+
+            **Step 4:** Navigate to **My Declaration** and review all information entered. Ensure that all details and declared amounts are accurate before submission.
+
+            **Step 5:** Click **Submit Declaration**. Once submitted, the declaration will be **locked and cannot be modified** by the employee.
+
+            > **Note:** Employees opting for the **New Tax Regime** can directly review, submit & lock their declaration, as investment details are not required.
+
+            ---
+
+            ### Field-by-field tips while filling Step 3
+
+            For every deduction you want to claim under the Old Regime:
+            1. Pick the **Section / Claim type** (for example, *Section 80C — LIC, PPF, ELSS, etc.*).  
+            2. Pick the **Item** under that section.  
+            3. Enter the **Declared amount (₹)** as a whole number.  
+            4. Fill any **claim-specific fields** that appear (they change based on the section).  
+            5. Enter **Expected proof** (auto-filled with a suggestion you can edit) and an optional remark.  
+            6. Click **Add declaration item**.
+
+            Repeat for each claim. Items appear in the register at the bottom of this page. Use the **✏️ Manage / Resubmit** tab to update or delete items while the declaration is still in DRAFT.
+
+            **Section-specific reminders:**  
+            • **Section 126 (80D) — Health insurance**: select *Self / Self + Family / Parents*. If you choose **Parents**, an extra **Parent name(s)** field appears and is mandatory.  
+            • **Section 127 (80DD) / Section 128 (80DDB)**: pick *Claiming for*, *Relation to employee*, and for 80DDB also enter the **Disease name**.  
+            • **Section 129 (80E) — Education loan interest**: claim allowed only for *Self / Spouse / Children*.  
+            • **HRA**: enter **monthly rent** (annual is auto-calculated), landlord name + relation + property address. **Landlord PAN is mandatory if annual rent exceeds ₹1,00,000.**  
+            • **Section 130 (24b) — Home loan interest**: enter lender name, lender PAN, lender address, and whether the property is self-occupied or rented.  
+            • **Form 124 — Children Education Allowance**: no amount is needed; just enter **eligible children count** (max 4) and **school / institution name**.
+
+            **General rules to remember:**  
+            • Amounts must be **whole numbers** (no decimals).  
+            • Some sections have **statutory caps** (for example 80C is capped at ₹1,50,000) — declaring above the cap will be flagged for review.  
+            • Mandatory fields are marked with a red asterisk *.  
+            • Remarks are optional but help the tax team understand any unusual claim.  
+            • **Proof Submission** opens in **February 2027** — keep receipts, premium statements, rent receipts, certificates etc. until then.
+            """
+        )
+        if st.button("Got it — hide this guide", key="_investment_guide_dismiss"):
+            st.session_state["_investment_guide_seen"] = True
+            st.rerun()
+    # Mark as seen the first time the panel renders, so the next visit shows
+    # the guide collapsed by default (but still available).
+    st.session_state["_investment_guide_seen"] = True
+
     if header.get("tax_regime") != "Old Regime":
         st.warning(
             "Form 12BB / 124 declaration is available only for **Old Regime** employees. "
