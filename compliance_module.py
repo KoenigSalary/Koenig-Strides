@@ -287,6 +287,34 @@ def _declaration_locked(header: Optional[Dict[str, Any]]) -> bool:
         str(header.get("workflow_stage") or "").upper() == "DECLARATION_LOCKED"
 
 
+
+# =====================================================
+# Streamlit caching layer (perf)
+# Compliance read helpers below are wrapped with a short-TTL cache so
+# typing in form fields does not trigger a fresh DB round-trip on every
+# rerun. Writes call _compliance_bust_cache() to invalidate immediately.
+# =====================================================
+
+_CACHE_TTL_SECONDS = 30
+
+
+def _compliance_bust_cache() -> None:
+    """Invalidate all cached compliance reads. Call after any write."""
+    for fn_name in (
+        "list_declaration_items",
+        "list_allowance_claims",
+        "list_review_items",
+        "list_proofs_for_item",
+        "get_or_create_header",
+    ):
+        fn = globals().get(fn_name)
+        if fn is not None and hasattr(fn, "clear"):
+            try:
+                fn.clear()
+            except Exception:
+                pass
+
+
 # =====================================================
 # SCHEMA INITIALISATION
 # Auto-creates tables on first call. Idempotent.
@@ -479,7 +507,7 @@ def _audit(actor: str, action: str, entity_type: str, entity_id: str, details: s
 # CORE DATA FUNCTIONS — HEADER
 # =====================================================
 
-def get_or_create_header(employee_id: str, fy: str = CURRENT_FY) -> Dict[str, Any]:
+def _uncached_get_or_create_header(employee_id: str, fy: str = CURRENT_FY) -> Dict[str, Any]:
     ensure_schema()
     conn = _get_conn()
     cur = conn.cursor()
@@ -671,7 +699,7 @@ def delete_declaration_item(item_id: int, employee_id: str) -> None:
     _audit(employee_id, "DELETE_DECLARATION_ITEM", "declaration_item", str(item_id), "")
 
 
-def list_declaration_items(employee_id: str) -> List[Dict[str, Any]]:
+def _uncached_list_declaration_items(employee_id: str) -> List[Dict[str, Any]]:
     ensure_schema()
     conn = _get_conn()
     cur = conn.cursor()
@@ -819,7 +847,7 @@ def save_proof(item_id: int, employee_id: str, actual_amount: float, file_obj) -
     _audit(employee_id, "UPLOAD_PROOF", "declaration_item", str(item_id), f"{fname} ({size} bytes)")
 
 
-def list_proofs_for_item(item_id: int) -> List[Dict[str, Any]]:
+def _uncached_list_proofs_for_item(item_id: int) -> List[Dict[str, Any]]:
     conn = _get_conn()
     cur = conn.cursor()
     try:
@@ -952,7 +980,7 @@ def decide_regime_change_request(request_id: int, decision: str,
 # ADMIN QUERIES
 # =====================================================
 
-def list_review_items() -> List[Dict[str, Any]]:
+def _uncached_list_review_items() -> List[Dict[str, Any]]:
     ensure_schema()
     conn = _get_conn()
     cur = conn.cursor()
@@ -1247,6 +1275,14 @@ def validate_declaration_payload(payload: Dict[str, Any]) -> List[str]:
         if not (payload.get("disease_name") or "").strip():
             errors.append("Disease name is mandatory for Section 128 (Earlier 80DDB).")
 
+    # Parent-name capture is mandatory whenever the claim is for Parents
+    # in any of the medical / education sections.
+    meta = payload.get("metadata") or {}
+    claimant_text = (payload.get("claimant_for") or "").lower()
+    if section in ("80D", "80DD", "80DDB", "80E") and "parent" in claimant_text:
+        if not (meta.get("parent_name") or "").strip():
+            errors.append("Parent name is mandatory when the claim is for Parents.")
+
     if section == "24(b)":
         lender_name = (meta.get("lender_name") or "").strip()
         lender_pan = (meta.get("lender_pan") or "").strip().upper()
@@ -1530,12 +1566,25 @@ def _render_item_form(prefix: str, defaults: Optional[Dict[str, Any]] = None) ->
         )
 
     # Claim-specific inputs
+    parent_name_key = f"parent_name_{prefix}"
     if section_code in ("80DD", "80DDB", "80E"):
         opts = [""] + (CLAIMANT_OPTIONS_80E if section_code == "80E" else CLAIMANT_OPTIONS)
         cur = defaults.get("claimant_for", "")
         st.selectbox(
             _required_label("Claiming for"), opts,
             index=opts.index(cur) if cur in opts else 0, key=claimant_key,
+        )
+
+    # Parent-name capture for any section where the claim can be "Parents"
+    # (Section 126 / 80D mediclaim is the common case the user flagged.)
+    current_claimant = _state_val(claimant_key, defaults.get("claimant_for", "")) or ""
+    show_parent_name = section_code in ("80D", "80DD", "80DDB", "80E") and "parent" in current_claimant.lower()
+    if show_parent_name:
+        st.text_input(
+            _required_label("Parent name(s) — comma separated for both parents"),
+            value=(meta_defaults.get("parent_name") or defaults.get("parent_name") or ""),
+            key=parent_name_key,
+            placeholder="e.g., Suresh Kumar, Sunita Devi",
         )
 
     if section_code in ("80DD", "80DDB"):
@@ -1652,6 +1701,9 @@ def _render_item_form(prefix: str, defaults: Optional[Dict[str, Any]] = None) ->
         payload["metadata"]["school_name"] = _state_val(school_key, meta_defaults.get("school_name", ""))
     if section_code == "OTHER_VIA":
         payload["metadata"]["section_reference"] = _state_val(other_section_key, meta_defaults.get("section_reference", ""))
+
+    if section_code in ("80D", "80DD", "80DDB", "80E") and "parent" in (payload.get("claimant_for") or "").lower():
+        payload["metadata"]["parent_name"] = (_state_val(parent_name_key, meta_defaults.get("parent_name", "")) or "").strip()
 
     return payload, {"step": 1, "max_step": 1}
 
@@ -2425,7 +2477,7 @@ def delete_allowance_claim(claim_id: int, employee_id: str) -> None:
     _audit(employee_id, "DELETE_ALLOWANCE_CLAIM", "allowance_claim", str(claim_id), "")
 
 
-def list_allowance_claims(employee_id: Optional[str] = None,
+def _uncached_list_allowance_claims(employee_id: Optional[str] = None,
                            only_pending: bool = False) -> List[Dict[str, Any]]:
     ensure_schema()
     conn = _get_conn()
@@ -2903,3 +2955,77 @@ def render_admin_workflow_settings() -> None:
     else:
         st.error(f"⛔ Allowance window is currently **CLOSED** (mode: {current_override}, "
                  f"cutoff: day {current_cutoff}).")
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def list_declaration_items(employee_id: str):
+    return _uncached_list_declaration_items(employee_id)
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def list_proofs_for_item(item_id: int):
+    return _uncached_list_proofs_for_item(item_id)
+
+
+@st.cache_data(ttl=20, show_spinner=False)
+def list_review_items():
+    return _uncached_list_review_items()
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def get_or_create_header(employee_id: str, fy: str = CURRENT_FY):
+    return _uncached_get_or_create_header(employee_id, fy)
+
+
+@st.cache_data(ttl=20, show_spinner=False)
+def list_allowance_claims(employee_id: Optional[str] = None,
+                           only_pending: bool = False):
+    return _uncached_list_allowance_claims(employee_id=employee_id, only_pending=only_pending)
+
+
+
+# # AUTO-BUST CACHE ON WRITES
+# Wrap each write function so it busts the read cache automatically.
+def _wrap_with_bust(fn):
+    def _wrapper(*a, **kw):
+        try:
+            return fn(*a, **kw)
+        finally:
+            try:
+                _compliance_bust_cache()
+            except Exception:
+                pass
+    _wrapper.__name__ = getattr(fn, "__name__", "wrapped")
+    _wrapper.__doc__ = getattr(fn, "__doc__", None)
+    return _wrapper
+
+if "add_declaration_item" in globals():
+    add_declaration_item = _wrap_with_bust(add_declaration_item)  # type: ignore[assignment]
+if "update_declaration_item" in globals():
+    update_declaration_item = _wrap_with_bust(update_declaration_item)  # type: ignore[assignment]
+if "delete_declaration_item" in globals():
+    delete_declaration_item = _wrap_with_bust(delete_declaration_item)  # type: ignore[assignment]
+if "save_regime" in globals():
+    save_regime = _wrap_with_bust(save_regime)  # type: ignore[assignment]
+if "submit_regime" in globals():
+    submit_regime = _wrap_with_bust(submit_regime)  # type: ignore[assignment]
+if "create_regime_change_request" in globals():
+    create_regime_change_request = _wrap_with_bust(create_regime_change_request)  # type: ignore[assignment]
+if "decide_regime_change_request" in globals():
+    decide_regime_change_request = _wrap_with_bust(decide_regime_change_request)  # type: ignore[assignment]
+if "save_proof" in globals():
+    save_proof = _wrap_with_bust(save_proof)  # type: ignore[assignment]
+if "review_declaration_item" in globals():
+    review_declaration_item = _wrap_with_bust(review_declaration_item)  # type: ignore[assignment]
+if "reopen_employee_declaration" in globals():
+    reopen_employee_declaration = _wrap_with_bust(reopen_employee_declaration)  # type: ignore[assignment]
+if "submit_declaration" in globals():
+    submit_declaration = _wrap_with_bust(submit_declaration)  # type: ignore[assignment]
+if "save_allowance_claim" in globals():
+    save_allowance_claim = _wrap_with_bust(save_allowance_claim)  # type: ignore[assignment]
+if "update_allowance_claim" in globals():
+    update_allowance_claim = _wrap_with_bust(update_allowance_claim)  # type: ignore[assignment]
+if "review_allowance_claim" in globals():
+    review_allowance_claim = _wrap_with_bust(review_allowance_claim)  # type: ignore[assignment]
+if "set_setting" in globals():
+    set_setting = _wrap_with_bust(set_setting)  # type: ignore[assignment]
