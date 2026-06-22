@@ -1402,44 +1402,61 @@ def _workflow_panels() -> List[tuple[str, str]]:
     ]
 
 
+_COMPLIANCE_PANEL_KEY_BY_TARGET = {
+    "tax_regime": "Compliance Tax Regime",
+    "investment": "Compliance Investment Declaration",
+    "my_declaration": "Compliance My Declaration",
+    "monthly_allowances": "Compliance Monthly Allowances",
+    "proof_submission": "Compliance Proof Submission",
+}
+
+
+def _navigate_to_target(target_key: str) -> None:
+    """Route to another Strides panel using the host app's own selector."""
+    panel_name = _COMPLIANCE_PANEL_KEY_BY_TARGET.get(target_key)
+    if not panel_name:
+        return
+    st.session_state["selected_panel"] = panel_name
+    # Some hosts gate panels behind "start_completed"; ensure the gate is open.
+    if "start_completed" in st.session_state:
+        st.session_state["start_completed"] = True
+    st.rerun()
+
+
 def _workflow_nav_buttons(current_key: str) -> None:
     panels = _workflow_panels()
     keys = [key for key, _ in panels]
     labels = {key: label for key, label in panels}
+    if current_key not in keys:
+        return
     idx = keys.index(current_key)
     prev_key = keys[idx - 1] if idx > 0 else None
     next_key = keys[idx + 1] if idx < len(keys) - 1 else None
-    st.session_state.setdefault("compliance_target_panel", current_key)
     c1, c2, c3 = st.columns([1, 2.6, 1])
     if c1.button("◀ Previous step", key=f"page_back_{current_key}", use_container_width=True, disabled=prev_key is None):
-        st.session_state["compliance_target_panel"] = prev_key
-        st.rerun()
+        _navigate_to_target(prev_key)
     c2.markdown(
         f"<div style='background:#eef6ff;border:1px solid #c9def7;padding:0.6rem 0.8rem;border-radius:0.75rem;text-align:center;font-weight:600;color:#194b7a;'>◀ Previous step &nbsp; • &nbsp; Current step: {labels[current_key]} &nbsp; • &nbsp; Next step ▶</div>",
         unsafe_allow_html=True,
     )
     if c3.button("Next step ▶", key=f"page_next_{current_key}", use_container_width=True, disabled=next_key is None):
-        st.session_state["compliance_target_panel"] = next_key
-        st.rerun()
+        _navigate_to_target(next_key)
 
 
 def _delegate_employee_panel(current_key: str, employee_id: str) -> bool:
-    target = st.session_state.get("compliance_target_panel", current_key)
-    if target == current_key:
-        return False
-    mapping = {
-        "tax_regime": render_tax_regime_panel,
-        "investment": render_investment_declaration_panel,
-        "my_declaration": render_my_declaration_panel,
-        "monthly_allowances": render_monthly_allowances_panel,
-        "proof_submission": render_proof_submission_panel,
-    }
-    fn = mapping.get(target)
-    if fn is None:
-        st.session_state["compliance_target_panel"] = current_key
-        return False
-    fn(employee_id)
-    return True
+    """Compatibility shim.
+
+    Earlier versions used an internal target panel state to switch the rendered
+    panel from inside the module. That hijacked the host app's own sidebar
+    selection and caused every compliance button to re-render the first panel.
+    The router is now handled by the host app via ``selected_panel``, so this
+    function intentionally does nothing and always returns False so that the
+    caller renders its own panel content.
+    """
+    # Clear any legacy target state so it cannot interfere with future renders.
+    if "compliance_target_panel" in st.session_state:
+        del st.session_state["compliance_target_panel"]
+    return False
 
 
 def _render_item_form(prefix: str, defaults: Optional[Dict[str, Any]] = None) -> Tuple[Dict[str, Any], Dict[str, int]]:
@@ -1846,8 +1863,7 @@ def render_my_declaration_panel(employee_id: str) -> None:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
         if d3.button("🔎 Preview and Confirm", use_container_width=True):
-            st.session_state["compliance_target_panel"] = "tax_regime"
-            st.rerun()
+            _navigate_to_target("tax_regime")
     else:
         st.info("No declarations yet.")
 
