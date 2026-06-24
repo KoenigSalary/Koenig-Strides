@@ -1932,11 +1932,16 @@ def render_tax_regime_panel(employee_id: str) -> None:
     with st.container(border=True):
         st.markdown("#### Choose your tax regime for the year")
         current = header.get("tax_regime") or "Old Regime"
+        # If the user is preparing a regime change request we keep the radio
+        # interactive so they can preview both options. The header lock still
+        # prevents Save / Submit until the admin approves the change.
+        _radio_disabled = bool(header.get("is_locked")) and not st.session_state.get("_show_regime_change_options", False)
         regime = st.radio(
             "Regime", ["Old Regime", "New Regime"],
             index=0 if current == "Old Regime" else 1,
             horizontal=True,
-            disabled=bool(header.get("is_locked")),
+            disabled=_radio_disabled,
+            key="tax_regime_radio",
         )
         st.info(
             "**Old Regime** — claim deductions like 80C, 80D, HRA. Mandatory to submit "
@@ -1969,16 +1974,21 @@ def render_tax_regime_panel(employee_id: str) -> None:
             st.caption("Allowed once per tax year, subject to admin approval.")
             current = header.get("tax_regime") or ""
             other = "New Regime" if current == "Old Regime" else "Old Regime"
-            reason = st.text_area("Reason for change", placeholder="Explain why you'd like to switch...")
             already_used = int(header.get("regime_change_used") or 0) >= 1
             if already_used:
                 st.warning("⚠️ One-time regime change already used for this tax year.")
+            preview_btn = st.checkbox(
+                "Enable both Old / New Regime options above to compare before requesting change",
+                key="_show_regime_change_options",
+            )
+            reason = st.text_area("Reason for change", placeholder="Explain why you'd like to switch...")
             if st.button(f"Request change to {other}", disabled=already_used):
                 if not reason.strip():
                     st.error("Please provide a reason.")
                 else:
                     try:
                         create_regime_change_request(employee_id, other, reason.strip())
+                        st.session_state["_show_regime_change_options"] = False
                         st.success("Request submitted to tax team for approval.")
                         st.rerun()
                     except Exception as exc:
@@ -2053,11 +2063,20 @@ def render_investment_declaration_panel(employee_id: str) -> None:
     # the guide collapsed by default (but still available).
     st.session_state["_investment_guide_seen"] = True
 
+    # Always render workflow nav first so the user can jump to the next or previous step
+    # (My Declaration / Tax Regime) even when this page is not applicable for their regime.
+    _workflow_nav_buttons("investment")
+
     if header.get("tax_regime") != "Old Regime":
         st.warning(
             "Form 12BB / 124 declaration is available only for **Old Regime** employees. "
             "Visit the **Tax Regime** panel first to select Old Regime."
         )
+        col_a, col_b = st.columns(2)
+        if col_a.button("▶ Continue to My Declaration", use_container_width=True, key="invest_skip_to_my"):
+            _navigate_to_target("my_declaration")
+        if col_b.button("◀ Back to Tax Regime", use_container_width=True, key="invest_back_to_regime"):
+            _navigate_to_target("tax_regime")
         return
 
     if locked:
@@ -2067,7 +2086,6 @@ def render_investment_declaration_panel(employee_id: str) -> None:
         "Children declaration highlight: if you want to claim **Children Education Allowance**, "
         "please add the dedicated **Form No. 124 — Children Declaration / Children Education Allowance** item and complete the children count + school details."
     )
-    _workflow_nav_buttons("investment")
 
     add_tab, manage_tab = st.tabs(["➕ Add Item", "✏️ Manage / Resubmit"])
 
