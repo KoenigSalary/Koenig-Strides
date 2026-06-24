@@ -1,0 +1,15 @@
+# Force light theme for all users.
+# This overrides the visitor's system / browser dark-mode setting so the
+# Koenig Strides app always renders in the same readable light theme.
+# No application code changes are required — just commit this file.
+
+[theme]
+base = "light"
+primaryColor = "#1f6feb"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f5f7fb"
+textColor = "#1f2937"
+font = "sans serif"
+
+[client]
+toolbarMode = "minimal"
