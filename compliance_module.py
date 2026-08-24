@@ -451,12 +451,40 @@ def _compliance_bust_cache() -> None:
 # Auto-creates tables on first call. Idempotent.
 # =====================================================
 
+
+
+_CM_STYLE_BLOCK = """
+<style>
+.cm-remarks-box { background:#fff7d6; border-left:4px solid #f2c94c; padding:0.7rem 0.9rem; border-radius:0.6rem; margin:0.35rem 0 0.85rem 0; }
+.cm-remarks-label { font-size:0.82rem; font-weight:700; color:#7a5a00; margin-bottom:0.2rem; }
+.cm-remarks-text { color:#333333; white-space:pre-wrap; }
+.cm-step-bar { background:#eef6ff; border:1px solid #c9def7; padding:0.6rem 0.8rem; border-radius:0.75rem; text-align:center; font-weight:600; color:#194b7a; }
+html[data-theme="dark"] .cm-remarks-box { background:#3a3317; border-left-color:#b8912f; }
+html[data-theme="dark"] .cm-remarks-label { color:#e3c26a; }
+html[data-theme="dark"] .cm-remarks-text { color:#f1e8cf; }
+html[data-theme="dark"] .cm-step-bar { background:#16283f; border-color:#2d4a6e; color:#bcd6f7; }
+</style>
+"""
+
+
+def _inject_cm_styles() -> None:
+    """Inject compliance-module CSS once per session (light + dark safe)."""
+    if st.session_state.get("_cm_styles_injected"):
+        return
+    st.session_state["_cm_styles_injected"] = True
+    try:
+        st.markdown(_CM_STYLE_BLOCK, unsafe_allow_html=True)
+    except Exception:
+        pass
+
+
 _INIT_DONE = False
 
 
 def ensure_schema() -> None:
     """Create compliance tables if they don't exist. Safe to call repeatedly."""
     global _INIT_DONE
+    _inject_cm_styles()
     if _INIT_DONE:
         return
 
@@ -1567,9 +1595,9 @@ def _render_remarks_box(label: str, text_value: str) -> None:
     safe_label = html.escape(str(label))
     safe_text = html.escape(str(text_value))
     st.markdown(
-        f"<div style='background:#fff7d6;border-left:4px solid #f2c94c;padding:0.7rem 0.9rem;border-radius:0.6rem;margin:0.35rem 0 0.85rem 0;'>"
-        f"<div style='font-size:0.82rem;font-weight:700;color:#7a5a00;margin-bottom:0.2rem;'>{safe_label}</div>"
-        f"<div style='color:#333333;white-space:pre-wrap;'>{safe_text}</div></div>",
+        f"<div class='cm-remarks-box'>"
+        f"<div class='cm-remarks-label'>{safe_label}</div>"
+        f"<div class='cm-remarks-text'>{safe_text}</div></div>",
         unsafe_allow_html=True,
     )
 
@@ -1696,7 +1724,7 @@ def _workflow_nav_buttons(current_key: str) -> None:
     if c1.button("◀ Previous step", key=f"page_back_{current_key}", use_container_width=True, disabled=prev_key is None):
         _navigate_to_target(prev_key)
     c2.markdown(
-        f"<div style='background:#eef6ff;border:1px solid #c9def7;padding:0.6rem 0.8rem;border-radius:0.75rem;text-align:center;font-weight:600;color:#194b7a;'>◀ Previous step &nbsp; • &nbsp; Current step: {labels[current_key]} &nbsp; • &nbsp; Next step ▶</div>",
+        f"<div class='cm-step-bar'>◀ Previous step &nbsp; • &nbsp; Current step: {labels[current_key]} &nbsp; • &nbsp; Next step ▶</div>",
         unsafe_allow_html=True,
     )
     if c3.button("Next step ▶", key=f"page_next_{current_key}", use_container_width=True, disabled=next_key is None):
