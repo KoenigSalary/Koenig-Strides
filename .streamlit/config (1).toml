@@ -1,0 +1,13 @@
+# Theme follows each viewer's system / Streamlit theme setting.
+# The custom palette below applies to the light theme; dark mode uses
+# Streamlit's dark palette plus the dark overrides in app.py CSS.
+
+[theme]
+primaryColor = "#1f6feb"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f5f7fb"
+textColor = "#1f2937"
+font = "sans serif"
+
+[client]
+toolbarMode = "minimal"
