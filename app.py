@@ -871,6 +871,55 @@ body.is-login-page [data-testid="column"]:first-child .stButton > button:hover {
     .hero h2 { font-size:21px; }
     .hero p { font-size:14px; }
 }
+
+/* ---------- DARK THEME OVERRIDES (follows viewer's system/Streamlit setting) ---------- */
+html[data-theme="dark"] :root {
+    --bg:#0e1524; --card:#161f36; --border:#2b3a5c; --text:#e7ecf5; --muted:#93a4bd;
+}
+html[data-theme="dark"] [data-testid="stAppViewContainer"] {
+    background:
+        radial-gradient(circle at 8% 12%, rgba(21,91,232,.14), transparent 35%),
+        radial-gradient(circle at 92% 88%, rgba(6,27,85,.25), transparent 40%),
+        var(--bg);
+}
+html[data-theme="dark"] .card,
+html[data-theme="dark"] .user-pill,
+html[data-theme="dark"] div[data-testid="stForm"] {
+    background:var(--card);
+    border-color:var(--border);
+    color:var(--text);
+}
+html[data-theme="dark"] .brand-title { color:var(--text); }
+html[data-theme="dark"] .brand-subtitle { color:var(--muted); }
+html[data-theme="dark"] .stButton > button {
+    background:#1d2946 !important;
+    color:#e7ecf5 !important;
+    border-color:var(--border) !important;
+    box-shadow:0 3px 10px rgba(0,0,0,.25) !important;
+}
+html[data-theme="dark"] .stButton > button:hover {
+    background:#25355c !important;
+    border-color:#4b6cb0 !important;
+}
+html[data-theme="dark"] div[data-testid="stTextInput"] input,
+html[data-theme="dark"] div[data-testid="stTextArea"] textarea,
+html[data-theme="dark"] div[data-testid="stNumberInput"] input {
+    background:#1d2946;
+    color:#e7ecf5;
+    border-color:#33456b;
+}
+html[data-theme="dark"] .answer-box { background:#0e2a1c; border-color:#14532d; color:#d7f5e4; }
+html[data-theme="dark"] .protected-box { background:#2a190d; border-color:#b45309; color:#fde8cf; }
+html[data-theme="dark"] .user-bubble { background:#122a52; border-color:#1e3a8a; color:#dbeafe; }
+html[data-theme="dark"] .bot-bubble { background:#1a2338; border-color:#2b3a5c; color:#e7ecf5; }
+html[data-theme="dark"] .selected-pill { background:#122a52; color:#93c5fd; border-color:#1e3a8a; }
+html[data-theme="dark"] .side-item-active { background:#122a52; color:#93c5fd; }
+html[data-theme="dark"] .footer-line { border-top-color:#2b3a5c; color:var(--muted); }
+html[data-theme="dark"] .login-form-card { background:var(--card); border-color:var(--border); color:var(--text); }
+html[data-theme="dark"] .login-title-text, html[data-theme="dark"] .login-form-heading { color:#dbeafe; }
+html[data-theme="dark"] .login-subtitle, html[data-theme="dark"] .login-help-foot { color:var(--muted); }
+html[data-theme="dark"] .rms-gate-foot { color:var(--muted); }
+html[data-theme="dark"] .rms-gate-foot a { color:#93c5fd; }
 </style>
 """, unsafe_allow_html=True)
 
