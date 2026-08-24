@@ -1036,8 +1036,13 @@ def init_users_file():
             }])
             df.to_csv(USERS_PATH, index=False)
 
+@st.cache_data(ttl=30, show_spinner=False)
 def load_users():
-    """Load all users as a DataFrame. Tries DB first, CSV fallback."""
+    """Load all users as a DataFrame. Tries DB first, CSV fallback.
+
+    Cached briefly (30s) so back-to-back reruns don't re-query the users
+    table. save_users() clears this cache after every write, so the UI never
+    shows stale rows after an admin edit."""
     init_users_file()
     try:
         conn = get_db_connection()
@@ -1109,6 +1114,11 @@ def save_users(df):
     # CSV fallback with lock
     with _users_lock:
         df.to_csv(USERS_PATH, index=False)
+    try:
+        load_users.clear()
+    except Exception:
+        pass
+
 
 def bool_from_str(value):
     return str(value).strip().lower() in ["true", "1", "yes", "y"]
@@ -1916,6 +1926,12 @@ def get_module_for_row(row):
     if any(x in combined for x in ["salary","payroll","ctc","reimbursement"]):
         return "Salary Queries"
     return "Tax FAQs"
+
+# Fragment decorator — reruns only the decorated block instead of the full
+# 7000-line script on every widget interaction. Falls back to a no-op if the
+# installed Streamlit is older than 1.33.
+_fragment = getattr(st, "fragment", None) or (lambda fn: fn)
+
 
 def render_spoc_routing():
     """Render the SPOC Routing module — sourced ONLY from the SPOC Master sheet."""
@@ -2961,6 +2977,41 @@ def logout():
 # ADMIN ANALYTICS DASHBOARD
 # =====================================================
 
+@st.cache_data(ttl=20, show_spinner=False)
+def _load_query_log(limited: bool = True) -> pd.DataFrame:
+    """Cached read of the Ask Strides query log for admin/analytics panels.
+
+    Short TTL keeps the view fresh enough for review purposes while avoiding
+    a DB round-trip on every rerun. Cleared implicitly by TTL expiry."""
+    _ensure_query_log_table()
+    conn = get_db_connection()
+    try:
+        if limited:
+            return pd.read_sql_query(
+                "SELECT * FROM query_log ORDER BY asked_at DESC", conn
+            )
+        return pd.read_sql_query(
+            "SELECT query, in_record, response_type, source FROM query_log", conn
+        )
+    finally:
+        conn.close()
+
+
+@st.cache_data(ttl=20, show_spinner=False)
+def _load_audit_log() -> pd.DataFrame:
+    """Cached read of the last 100 audit rows for the admin dashboard."""
+    conn = get_db_connection()
+    try:
+        return pd.read_sql_query(
+            "SELECT timestamp, actor_id, actor_role, action, target_id, details "
+            "FROM audit_log ORDER BY id DESC LIMIT 100",
+            conn,
+        )
+    finally:
+        conn.close()
+
+
+@_fragment
 def render_question_analytics():
     """Admin panel: shows what employees ask Strides, what's in record vs not."""
     st.markdown("## 📊 Question Analytics")
@@ -2969,17 +3020,7 @@ def render_question_analytics():
         "by the FAQ knowledge base and what topics need new FAQ rows."
     )
 
-    _ensure_query_log_table()
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        df = pd.read_sql_query(
-            "SELECT * FROM query_log ORDER BY asked_at DESC",
-            conn,
-        )
-        conn.close()
-    except Exception as e:
-        st.error(f"Could not load query log: {e}")
-        return
+    df = _load_query_log()
 
     if df.empty:
         st.info("No questions have been asked yet. Once employees use Ask Strides, their queries will appear here.")
@@ -3465,6 +3506,7 @@ def render_tax_calculator_panel():
     )
 
 
+@_fragment
 def render_home_admin_charts():
     """Admin-only mini-dashboard shown on the Home panel.
 
@@ -3481,13 +3523,7 @@ def render_home_admin_charts():
     st.caption("Admin view — live numbers from the Ask Strides query log.")
 
     try:
-        _ensure_query_log_table()
-        conn = sqlite3.connect(DB_PATH)
-        df = pd.read_sql_query(
-            "SELECT query, in_record, response_type, source FROM query_log",
-            conn,
-        )
-        conn.close()
+        df = _load_query_log(limited=False)
     except Exception as e:
         st.info(f"Query log not yet available ({e}).")
         return
@@ -3538,6 +3574,7 @@ def render_home_admin_charts():
     )
 
 
+@_fragment
 def render_admin_analytics_dashboard():
     """High-level admin analytics: users, knowledge base, storage, audit log."""
     st.markdown("## 📈 Admin Analytics")
@@ -3600,13 +3637,7 @@ def render_admin_analytics_dashboard():
     # ---------------- Audit log ----------------
     st.markdown("### 🔍 Recent Audit Log (last 100)")
     try:
-        conn = get_db_connection()
-        audit_df = pd.read_sql_query(
-            "SELECT timestamp, actor_id, actor_role, action, target_id, details "
-            "FROM audit_log ORDER BY id DESC LIMIT 100",
-            conn,
-        )
-        conn.close()
+        audit_df = _load_audit_log()
         if audit_df.empty:
             st.info("No audit events recorded yet.")
         else:

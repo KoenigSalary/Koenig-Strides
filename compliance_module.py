@@ -1943,6 +1943,12 @@ def _render_item_form(prefix: str, defaults: Optional[Dict[str, Any]] = None) ->
     return payload, {"step": 1, "max_step": 1}
 
 
+# Fragment decorator — reruns only the decorated panel instead of the whole
+# script on every widget interaction (big win on the declaration forms).
+_fragment = getattr(st, "fragment", None) or (lambda fn: fn)
+
+
+@_fragment
 def render_tax_regime_panel(employee_id: str) -> None:
     if _delegate_employee_panel("tax_regime", employee_id):
         return
@@ -2023,6 +2029,7 @@ def render_tax_regime_panel(employee_id: str) -> None:
                         st.error(str(exc))
 
 
+@_fragment
 def render_investment_declaration_panel(employee_id: str) -> None:
     if _delegate_employee_panel("investment", employee_id):
         return
@@ -2188,6 +2195,7 @@ def render_investment_declaration_panel(employee_id: str) -> None:
         st.info("No declaration items yet. Add one above to get started.")
 
 
+@_fragment
 def render_proof_submission_panel(employee_id: str) -> None:
     if _delegate_employee_panel("proof_submission", employee_id):
         return
@@ -2197,6 +2205,7 @@ def render_proof_submission_panel(employee_id: str) -> None:
     st.info("This will be open in February 2027 for submission of proofs towards your investment declaration, so please make sure to arrange and upload them.")
 
 
+@_fragment
 def render_my_declaration_panel(employee_id: str) -> None:
     if _delegate_employee_panel("my_declaration", employee_id):
         return
@@ -2288,6 +2297,7 @@ def render_my_declaration_panel(employee_id: str) -> None:
 # UI PANELS — ADMIN
 # =====================================================
 
+@_fragment
 def render_admin_review_queue() -> None:
     ensure_schema()
     st.markdown("## 🛡️ Compliance Review Queue")
@@ -2366,6 +2376,7 @@ def render_admin_review_queue() -> None:
                     st.error(str(exc))
 
 
+@_fragment
 def render_admin_regime_change_panel() -> None:
     ensure_schema()
     if not _sarika_only():
@@ -2418,6 +2429,7 @@ def render_admin_regime_change_panel() -> None:
         st.dataframe(df[cols], use_container_width=True, hide_index=True)
 
 
+@_fragment
 def render_admin_compliance_reports() -> None:
     ensure_schema()
     if not _sarika_only():
@@ -3009,6 +3021,7 @@ def _render_allowance_form(prefix: str, defaults: Optional[Dict[str, Any]] = Non
     }
 
 
+@_fragment
 def render_monthly_allowances_panel(employee_id: str) -> None:
     if _delegate_employee_panel("monthly_allowances", employee_id):
         return
@@ -3219,6 +3232,7 @@ def render_admin_allowance_review_queue() -> None:
                     st.error(str(exc))
 
 
+@_fragment
 def render_admin_workflow_settings() -> None:
     ensure_schema()
     if not _sarika_only():

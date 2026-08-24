@@ -1,0 +1,7 @@
+# This file has moved.
+#
+# The active GitHub Actions workflow now lives at:
+#   .github/workflows/keep-alive.yml
+#
+# Edit the APP_URL value in that file (or set a repo variable APP_URL)
+# to point at your deployed Streamlit Cloud URL.
